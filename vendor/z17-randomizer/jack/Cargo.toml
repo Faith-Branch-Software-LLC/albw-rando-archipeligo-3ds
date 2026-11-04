@@ -1,0 +1,15 @@
+[package]
+name = "jack"
+version = "0.4.0"
+authors = ["Rick Fay <rickwithanh@gmail.com>"]
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+byteorder = { workspace = true }
+cli = { workspace = true }
+log = { workspace = true }
+macros = { workspace = true }
+rom = { workspace = true }
+serde = { workspace = true }
+yaz0 = { workspace = true }

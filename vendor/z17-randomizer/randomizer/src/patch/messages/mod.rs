@@ -1,0 +1,528 @@
+use crate::filler::filler_item::Item::{
+    PendantOfCourage, PendantOfPower, PendantOfWisdom, SageGulley, SageImpa, SageIrene, SageOren, SageOsfala,
+    SageRosso, SageSeres,
+};
+use crate::{
+    hints::{formatting::*, Hint},
+    patch::messages::{hint_ghosts::HintGhost, msbt::load_msbt},
+    regions, DashMap, Patcher, Result, SeedInfo,
+};
+use game::{Course::{self, *}, Item};
+use log::info;
+use macros::fail;
+
+mod hint_ghosts;
+mod msbt;
+
+/// Patch MSBT Message Files
+pub fn patch_messages(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    info!("Patching MSBT Files...");
+
+    // patch_flavor_text(patcher, seed_info)?; // FIXME breaks Maiamai Map
+    patch_file_select(patcher, seed_info)?;
+    // patch_pause_screen(patcher)?; TODO
+    patch_item_names(patcher, seed_info)?;
+    patch_event_item_get(patcher, seed_info)?;
+    patch_collect(patcher, seed_info)?;
+    patch_actions(patcher)?;
+    patch_ravio(patcher, seed_info)?;
+    patch_impa(patcher)?;
+    patch_great_rupee_fairy(patcher)?;
+    patch_treacherous_tower(patcher, seed_info)?;
+    patch_thief_girl(patcher)?;
+    patch_cross_old_man(patcher)?;
+
+    patch_street_merchant(patcher, seed_info)?;
+    patch_sahasrahla(patcher, seed_info)?;
+    patch_hint_ghosts(patcher, seed_info)?;
+    // patch_mother_maiamai_sign(patcher, seed_info)?;
+    patch_bow_of_light(patcher, seed_info)?;
+
+    Ok(())
+}
+
+/// Prints out all String Values and their indexed Label Keys for a given MSBT File
+pub fn research(patcher: &mut Patcher, course: Course, file: &str, edotor: bool) -> Vec<(String, String)> {
+    load_msbt(patcher, course, file).unwrap().research(edotor)
+}
+
+/// Flavor Text
+#[allow(unused)]
+fn patch_flavor_text(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let mut msbt = load_msbt(patcher, LanguageBoot, "Ed_StaffCreditMessageT")?;
+    msbt.set("T_Text_00", &seed_info.text.credits);
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// File Select Screen
+fn patch_file_select(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let mut file_select_b = load_msbt(patcher, LanguageBoot, "Mn_FileSelectB")?;
+    file_select_b.set("HeadLineText_00", &seed_info.hash.item_hash);
+    file_select_b.set("HeadLineText_01", &seed_info.hash.item_hash);
+    file_select_b.set("HeadLineText_10", &seed_info.hash.item_hash);
+    patcher.update(file_select_b.dump())?;
+
+    // let mut file_select_t = load_msbt(patcher, LanguageBoot, "Mn_FileSelectT")?;
+    // file_select_t.set("T_FileNumber_00", format!("Hash: {:0>5}", seed_info.hash));
+    // file_select_t.set("T_FileNumber_Hard_00", format!("Hash: {:0>5}", seed_info.hash));
+    // patcher.update(file_select_t.dump())?;
+
+    Ok(())
+}
+
+/// Pause Screen
+#[allow(unused)]
+fn patch_pause_screen(patcher: &mut Patcher) -> Result<()> {
+    let mut msbt = load_msbt(patcher, LanguageBoot, "Gm_PauseT")?;
+    msbt.set("L_Btn_01_T_GmOvr_00", "Warp");
+    msbt.set("T_Message_00", "Warp to Link's House?");
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Item Names
+fn patch_item_names(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    // Item names in textboxes
+    let mut item_name = load_msbt(patcher, LanguageBoot, "ItemName")?;
+    let mut item_name_upper = load_msbt(patcher, LanguageBoot, "ItemNameUpper")?;
+
+    // Repurpose unused strings as Rupee names so they show up in the shop
+    // FIXME - This is hacky, add these as new strings when size problem is fixed
+    item_name.set("item_name_tornaderod_rental", "Green Rupee");
+    item_name.set("item_name_icerod_rental", "Blue Rupee");
+    item_name.set("item_name_bfirerod_rental", "Red Rupee");
+    item_name.set("item_name_boomerang_rental", "Purple Rupee");
+    item_name.set("item_name_hookshot_rental", "Silver Rupee");
+    item_name.set("item_name_sandrod_rental", "Gold Rupee");
+
+    // Quake - Repurpose
+    item_name.set("item_name_gamecoin", "Quake");
+
+    if let Some(info) = &seed_info.archipelago_info {
+        // Repurpose Letter in a Bottle as Archipelago Item
+        item_name.set("item_name_messagebottle", "Archipelago Item");
+
+        let font = patcher.game.font().unwrap();
+
+        // Ravio items
+        for (index, item) in
+            ["icerod", "hookshot", "tornaderod", "bomb", "bow", "sandrod", "hammer", "boomerang", "firerod"]
+            .iter().enumerate()
+        {
+            item_name.set(&format!("item_name_{}", item), &info.get_item_name(&format!("Ravio's Shop ({})", index + 1))?);
+            item_name.set(&format!("item_name_{}_LV2", item), &info.get_item_name(&format!("Ravio's Shop ({})", index + 1))?);
+        }
+
+        // Mother Maiamai Items
+        if seed_info.settings.shuffle_maiamai_rewards {
+            let mm_items = ["Bow", "Boomerang", "Hookshot", "Hammer", "Bombs", "Fire Rod", "Ice Rod", "Tornado Rod", "Sand Rod"];
+            for i in 0..9 {
+                let item = info.get_item_name(&format!("Maiamai {} Upgrade", mm_items[i]))?;
+                let name = font.try_truncate_mid(&item, &format!(" ({})", seed_info.mother_maiamai_costs[i]), 240);
+                item_name_upper.add(&format!("item_name_mm{}", i), &name);
+            }
+        }
+    }
+
+    patcher.update(item_name.dump())?;
+    patcher.update(item_name_upper.dump())?;
+
+    // Item descriptions when picked up
+    // let mut event_item_get = load_msbt(patcher, LanguageBoot, "EventItemGet")?;
+    // event_item_get.set("triforce_courage", &format!("a thing happened")); // Earthquake
+    // patcher.update(event_item_get.dump())?;
+
+    // Item names in textboxes
+    // let mut item_name_upper = load_msbt(patcher, LanguageBoot, "ItemNameUpper")?;
+    // item_name_upper.set("item_name_triforce_courage", "Earthquake");
+    // patcher.update(item_name_upper.dump())?;
+
+    Ok(())
+}
+
+/// Item Descriptions
+fn patch_event_item_get(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let mut msbt = load_msbt(patcher, LanguageBoot, "EventItemGet")?;
+
+    msbt.set("none", "A quake shakes the kingdom!"); // ehh
+
+    msbt.set("item_bow", "You got the bow!");
+    msbt.set("item_boomerang", "You got the boomerang!");
+    msbt.set("item_hookshot", "You got the Hookshot!");
+    msbt.set("item_hammer", "You got the hammer!");
+    msbt.set("item_bomb", &format!("You got {}!", *BOMBS));
+    msbt.set("item_firerod", "You got the Fire Rod!");
+    msbt.set("item_icerod", "You got the Ice Rod!");
+    msbt.set("item_tornaderod", "You got the Tornado Rod!");
+    msbt.set("item_sandrod", "You got the Sand Rod!");
+
+    msbt.set("kandelaar", "You got the lamp!");
+    msbt.set("zelda_amulet", &format!("You got a special charm!\nIt's {}!", attention("useless"))); // Cut " from Princess Zelda"
+
+    if let Some(archipelago_info) = &seed_info.archipelago_info {
+        msbt.set("message_bottle", "You got an Archipelago item!");
+
+        let font = patcher.game.font().unwrap();
+        for (_, archipelago_item) in &archipelago_info.items {
+            let key = format!("ap_item_{}", archipelago_item.location_code);
+            use crate::ClassificationType::*;
+            let item_name = match archipelago_item.classification_type() {
+                ProgressionUseful => yellow(&archipelago_item.name),
+                Progression => plum(&archipelago_item.name),
+                Useful => slate(&archipelago_item.name),
+                Filler => yuga_talking(&archipelago_item.name),
+                Trap => attention(&archipelago_item.name),
+            };
+            let text = format!("You got {} for {}!", item_name, archipelago_item.player_name);
+            msbt.add(&key, &font.try_wrap(&text, 360));
+        }
+    }
+
+    for item in Item::new_items() {
+        msbt.add(item.get_item_message_name(), item.get_item_message());
+    }
+
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Gear Descriptions
+fn patch_collect(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let power = seed_info.layout.find_single(PendantOfPower).unwrap().0;
+    let wisdom = seed_info.layout.find_single(PendantOfWisdom).unwrap().0;
+    let courage = seed_info.layout.find_single(PendantOfCourage).unwrap().0;
+
+    let mut msbt = load_msbt(patcher, LanguageBoot, "Collect")?;
+
+    msbt.set("cl_instruction_power", &format!("A pendant you found at the\n{}.", power));
+    msbt.set("cl_instruction_wisdom", &format!("A pendant you found at the\n{}.", wisdom));
+    msbt.set("cl_instruction_courage", &format!("A pendant you found at the\n{}.", courage));
+
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Action icon text
+fn patch_actions(patcher: &mut Patcher) -> Result<()> {
+    let mut msbt = load_msbt(patcher, LanguageBoot, "Action")?;
+    msbt.set("cmn_action_throw", "Yeet");
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Ravio
+fn patch_ravio(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let (gulley, _) = seed_info.layout.find_single(SageGulley).unwrap();
+    let (oren, _) = seed_info.layout.find_single(SageOren).unwrap();
+    let (seres, _) = seed_info.layout.find_single(SageSeres).unwrap();
+    let (osfala, _) = seed_info.layout.find_single(SageOsfala).unwrap();
+    let (impa, _) = seed_info.layout.find_single(SageImpa).unwrap();
+    let (irene, _) = seed_info.layout.find_single(SageIrene).unwrap();
+    let (rosso, _) = seed_info.layout.find_single(SageRosso).unwrap();
+
+    let (article, demonstrative_pronoun, num_sages_txt) = match seed_info.settings.lc_requirement {
+        0 => ("", "those", "Zero Sages"),
+        1 => ("", "that", "One Sage"),
+        2 => ("", "those", "Two Sages"),
+        3 => ("", "those", "Three Sages"),
+        4 => ("", "those", "Four Sages"),
+        5 => ("", "those", "Five Sages"),
+        6 => ("", "those", "Six Sages"),
+        7 => (" the", "those", "Seven Sages"),
+        _ => fail!("Invalid lc_requirement: {}", seed_info.settings.lc_requirement),
+    };
+
+    let first_intro = &format!("What's that? You're looking for{}\n{}?", article, name(num_sages_txt));
+    let second_intro = &format!("Yeah...if you're looking for {}\n{}?", demonstrative_pronoun, name(num_sages_txt));
+
+    let gulley = &format!("\n{} is in{} {}.", green("Gulley"), dungeon_article(gulley), green(gulley));
+    let oren = &format!("\n{} is in{} {}.", beige("Queen Oren"), dungeon_article(oren), beige(oren));
+    let seres = &format!("\n{} is in{} {}.", blue("Seres"), dungeon_article(seres), blue(seres));
+    let osfala = &format!("\n{} is in{} {}.", beige("Osfala"), dungeon_article(osfala), beige(osfala));
+    let impa = &format!("\n{} is in{} {}.", purple("Lady Impa"), dungeon_article(impa), purple(impa));
+    let irene = &format!("\n{} is in{} {}.", name("Irene"), dungeon_article(irene), name(irene));
+    let rosso = &format!("\n{} is in{} {}.", attention("Rosso"), dungeon_article(rosso), attention(rosso));
+
+    let mut ravio_shop = load_msbt(patcher, IndoorLight, "FieldLight_2C")?;
+
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_03", first_intro);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_04", second_intro);
+
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_06", gulley);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_00", oren);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_01", seres);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_07", osfala);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_09", impa);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_05", irene);
+    ravio_shop.set("lgt_RentalKeeper_Field_2C_08", rosso);
+
+    patcher.update(ravio_shop.dump())?;
+
+    Ok(())
+}
+
+fn dungeon_article(dungeon_name: &str) -> String {
+    match dungeon_name {
+        "Skull Woods" | "Turtle Rock" => "",
+        _ => " the",
+    }.to_string()
+}
+
+/// Impa in Hyrule Castle dialogue
+fn patch_impa(patcher: &mut Patcher) -> Result<()> {
+    let mut msbt = load_msbt(patcher, IndoorLight, "FieldLight_1B")?;
+    msbt.set(
+        "FieldLight_1B_Impa_ACT3_10",
+        &format!(
+            "The princess left you that {}\nbecause she sensed something in\nyou, {}.\nDon't let her down.",
+            name("chest"),
+            *PLAYER_NAME
+        ),
+    );
+    msbt.set("FieldLight_1B_Soldier_ACT2_19", "So was Lady Impa looking as\nlovely as usual today?");
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+fn patch_great_rupee_fairy(patcher: &mut Patcher) -> Result<()> {
+    let mut grf = load_msbt(patcher, CaveDark, "Cave")?;
+    grf.set("CaveDark29_LuckyFairy_00", &format!("Throw Rupees into the fountain?\n{}", *CHOICE_2));
+    grf.set("CaveDark29_LuckyFairy_01", "Throw 3000");
+    grf.set("CaveDark29_LuckyFairy_02", "Don't throw any");
+    grf.clear("CaveDark29_LuckyFairy_03");
+    patcher.update(grf.dump())?;
+
+    Ok(())
+}
+
+/// Treacherous Tower
+fn patch_treacherous_tower(patcher: &mut Patcher, SeedInfo { settings, .. }: &SeedInfo) -> Result<()> {
+    let mut msbt = load_msbt(patcher, FieldDark, "FieldDark_05")?;
+
+    msbt.set(
+        "fd_GameTower_expert_select",
+        &format!(
+            "Sword boy is gonna be the next\ncontestant on the Random course,\nright?! Ya ready for this?{}",
+            *CHOICE_2
+        ),
+    );
+    msbt.set("fd_GameTower_expert_select_00", "Pay 200");
+    msbt.set("fd_GameTower_expert_select_01", "I'll pass");
+    msbt.set("fd_GameTower_expert_select_02", ""); // clear unused
+    msbt.set("fd_GameTower_expert_select_03", ""); // clear unused
+    msbt.set(
+        "fd_GameTower_expert_00",
+        &format!(
+            "Well, well, well! Double boom in the\nroom! I'm so impressed! The\nRandom course has {}!",
+            name(&format!("{} floors", settings.treacherous_tower_floors))
+        ),
+    );
+
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Thief Girl
+fn patch_thief_girl(patcher: &mut Patcher) -> Result<()> {
+    let mut msbt = load_msbt(patcher, DungeonHagure, "Hagure")?;
+
+    // Shorten initial Thief Girl text to just the last textbox.
+    msbt.set("Hagure_girl_03", "Come on. Let's hurry out of here. This\nplace gives me the chills.");
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Gramps
+fn patch_cross_old_man(patcher: &mut Patcher) -> Result<()> {
+    let mut msbt = load_msbt(patcher, FieldLight, "CrossOldMan")?;
+
+    msbt.set(
+        "cross_old_man_05_select",
+        &format!("Well then. Want to try your hand\nat battling {}?{}", name("me"), *CHOICE_2),
+    );
+    msbt.set("cross_old_man_10_select", &format!("Do you want to try battling me again?{}", *CHOICE_2));
+
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+/// Street Merchant - Shorten text & show the item names
+fn patch_street_merchant(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let item_name_left = seed_info.get_item_name("Street Merchant (Left)", regions::hyrule::kakariko::village::SUBREGION)?;
+    let item_name_right = seed_info.get_item_name("Street Merchant (Right)", regions::hyrule::kakariko::village::SUBREGION)?;
+
+    let mut street_merchant = load_msbt(patcher, FieldLight, "FieldLight_18")?;
+    street_merchant.set(
+        "lgt_NpcStand_BottleEmpty_00_select",
+        &format!("That's a {}.\nUseful for a bunch of things.\nHow about {}?{}", name(&item_name_left), *PRICE, *CHOICE_2),
+    );
+
+    street_merchant.set(
+        "lgt_NpcStand_ZoraTreasure_00_select",
+        &format!(
+            "Ah, yes! A {}\nof remarkable quality. Smooth as silk!\nAnd for you? Only {}!{}",
+            name(&item_name_right),
+            *PRICE,
+            *CHOICE_2
+        ),
+    );
+    street_merchant.set(
+        "lgt_NpcStand_ZoraTreasure_01",
+        &format!(
+            "Sorry to see it go, actually. I just\ncouldn't stop touching that\nsmooth, smooth {}.",
+            name(&item_name_right)
+        ),
+    );
+
+    patcher.update(street_merchant.dump())?;
+
+    Ok(())
+}
+
+/// Sahasrahla gives out the locations of the Red & Blue Pendants
+fn patch_sahasrahla(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let (power, _) = seed_info.layout.find_single(PendantOfPower).unwrap();
+    let (wisdom, _) = seed_info.layout.find_single(PendantOfWisdom).unwrap();
+    let (courage, _) = seed_info.layout.find_single(PendantOfCourage).unwrap();
+
+    let mut sahasrahla = load_msbt(patcher, IndoorLight, "FieldLight_18")?;
+
+    sahasrahla.set(
+        "lgt_Sahasrahla_first_03",
+        &format!("The {} is in the\n{}.", attention("Pendant of Power"), attention(power)),
+    );
+    sahasrahla
+        .set("lgt_Sahasrahla_first_12", &format!("The {} is in the\n{}.", name("Pendant of Wisdom"), name(wisdom)));
+    sahasrahla.set(
+        "lgt_Sahasrahla_first_10",
+        &format!("And the {} is in the\n{}.", green("Pendant of Courage"), green(courage)),
+    );
+
+    patcher.update(sahasrahla.dump())?;
+
+    Ok(())
+}
+
+fn patch_hint_ghosts(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    if seed_info.hints.always_hints.is_empty() && seed_info.hints.custom_hints.is_empty() {
+        info!("No Ghost Hints generated.");
+        return Ok(());
+    } else {
+        info!("Patching Hint Ghosts...");
+    }
+
+    // Organize Hints by the MSBT File they need to update
+    let mut msbt_hint_map = DashMap::default();
+    add_to_msbt_hint_map(&mut msbt_hint_map, &seed_info.hints.path_hints)?;
+    add_to_msbt_hint_map(&mut msbt_hint_map, &seed_info.hints.maiamai_hints)?;
+    add_to_msbt_hint_map(&mut msbt_hint_map, &seed_info.hints.always_hints)?;
+    add_to_msbt_hint_map(&mut msbt_hint_map, &seed_info.hints.sometimes_hints)?;
+    add_to_msbt_hint_map(&mut msbt_hint_map, &seed_info.hints.custom_hints)?;
+
+    // Load Font for word-wrapping
+    let font = patcher.game.font().unwrap();
+
+    // Update the MSBT Files with the generated Hints
+    for ((course, msbt_file), labels) in msbt_hint_map {
+        let mut msbt_file = load_msbt(patcher, course, msbt_file)?;
+
+        for (label, hint) in labels {
+            msbt_file.set(label, &font.try_wrap(&hint, 360));
+        }
+
+        patcher.update(msbt_file.dump())?;
+    }
+
+    Ok(())
+}
+
+fn add_to_msbt_hint_map<H>(
+    msbt_hint_map: &mut DashMap<(Course, &str), DashMap<&str, String>>, hints: &Vec<H>,
+) -> Result<()>
+where
+    H: Hint,
+{
+    for hint in hints {
+        for ghost in hint.get_ghosts() {
+            let hint_ghost = HintGhost::from(*ghost);
+            let entry = msbt_hint_map.entry((hint_ghost.course, hint_ghost.msbt_file)).or_default();
+            entry.insert(hint_ghost.msg_label, hint.get_hint());
+        }
+    }
+
+    Ok(())
+}
+
+/// Mother Maiamai Sign
+#[allow(unused)]
+fn patch_mother_maiamai_sign(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    let major_item_count = [
+        "Maiamai Bow Upgrade", "Maiamai Boomerang Upgrade", "Maiamai Hookshot Upgrade", "Maiamai Hammer Upgrade",
+        "Maiamai Bombs Upgrade", "Maiamai Fire Rod Upgrade", "Maiamai Ice Rod Upgrade", "Maiamai Tornado Rod Upgrade",
+        "Maiamai Sand Rod Upgrade", "Maiamai Great Spin",
+    ]
+    .iter()
+    .flat_map(|&loc| {
+        if let Some(item) = seed_info.layout.get(loc, regions::hyrule::lake::cave::SUBREGION) {
+            if item.is_major_item() {
+                return Some(());
+            }
+        }
+        None
+    })
+    .count();
+
+    let mut msbt = load_msbt(patcher, FieldLight, "FieldLight_35")?;
+    msbt.set(
+        "SNBD_lgt_FieldLight35_Kinsta_SignBoard_00",
+        &format!(
+            "Do Not Enter! Very Strange Creature\nwith {} Inside!",
+            attention(&format!("{} Major Item{}", major_item_count, if major_item_count == 1 { "" } else { "s" }))
+        ),
+    );
+    patcher.update(msbt.dump())?;
+
+    Ok(())
+}
+
+fn patch_bow_of_light(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
+    if let Some(bow_of_light_hint) = seed_info.hints.get_bow_of_light_hint() {
+        let mut msbt = load_msbt(patcher, IndoorDark, "HintGhostDark")?;
+        // Most of HintGhostDark.msbt is a duplicate of the identical file under FieldDark, but it's not used. Choosing
+        // an easily testable ghost Key to repurpose for a new Ghost in Hilda's Study.
+        msbt.set("HintGhost_FieldDark_2C_014", &bow_of_light_hint);
+        // fixme also dumb: clear out unused messages to keep filesize down.
+        msbt.clear("HintGhost_FieldDark_02_001");
+        msbt.clear("HintGhost_FieldDark_03_002");
+        msbt.clear("HintGhost_FieldDark_07_003");
+        msbt.clear("HintGhost_FieldDark_14_004");
+        msbt.clear("HintGhost_FieldDark_16_005");
+        msbt.clear("HintGhost_FieldDark_18_006");
+        msbt.clear("HintGhost_FieldDark_1A_009");
+        msbt.clear("HintGhost_FieldDark_1E_010");
+        msbt.clear("HintGhost_FieldDark_28_011");
+        msbt.clear("HintGhost_FieldDark_29_012");
+        msbt.clear("HintGhost_FieldDark_2A_013");
+        msbt.clear("HintGhost_FieldDark_30_015");
+        msbt.clear("HintGhost_FieldDark_33_016");
+        msbt.clear("HintGhost_FieldDark_35_017");
+        msbt.clear("HintGhost_FieldDark_35_018");
+        msbt.clear("HintGhost_FieldDark_35_019");
+        msbt.clear("HintGhost_FieldDark_1E_020");
+        msbt.clear("HintGhost_FieldDark_33_021");
+        msbt.clear("HintGhost_FieldDark_33_022");
+        patcher.update(msbt.dump())?;
+    }
+
+    Ok(())
+}

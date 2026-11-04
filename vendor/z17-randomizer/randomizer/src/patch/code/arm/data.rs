@@ -1,0 +1,120 @@
+use super::{Instruction, Register, R0};
+
+#[derive(Debug)]
+pub enum ShifterOperand {
+    Immediate { immed_8: u8, rotate_imm: u8 },
+    Register { rm: Register, shift: u8 },
+}
+
+impl ShifterOperand {
+    pub fn code(&self) -> u32 {
+        match self {
+            Self::Immediate { immed_8, rotate_imm } => 0x2000000 | (*rotate_imm as u32) << 8 | *immed_8 as u32,
+            Self::Register { rm, shift } => (*shift as u32) << 7 | rm.shift(0),
+        }
+    }
+}
+
+impl From<u32> for ShifterOperand {
+    fn from(immediate: u32) -> Self {
+        if immediate & 0xFF == immediate {
+            Self::Immediate { immed_8: immediate as u8, rotate_imm: 0 }
+        } else {
+            let mut shifted = immediate;
+            let mut failure = false;
+            ((1..=0xF)
+                .rev()
+                .find_map(|rotate_imm| {
+                    failure = failure || (shifted & 3 != 0);
+                    shifted >>= 2;
+                    if !failure && shifted & 0xFF == shifted {
+                        Some(Self::Immediate { immed_8: shifted as u8, rotate_imm })
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| format!("Could not convert {} into an operand.", immediate)))
+            .expect("Failed to assemble.")
+        }
+    }
+}
+
+impl From<Register> for ShifterOperand {
+    fn from(rm: Register) -> Self {
+        Self::Register { rm, shift: 0 }
+    }
+}
+
+impl From<(Register, u8)> for ShifterOperand {
+    fn from(reg_and_shift: (Register, u8)) -> Self {
+        let (rm, shift) = reg_and_shift;
+        Self::Register { rm, shift }
+    }
+}
+
+fn instruction(code: u32, opcode: u32, s: bool, rn: Register, rd: Register) -> Instruction {
+    Instruction::new(code | opcode << 21 | (s as u32) << 20 | rn.shift(16) | rd.shift(12))
+}
+
+pub fn add<O>(rd: Register, rn: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b0100, false, rn, rd)
+}
+
+pub fn sub<O>(rd: Register, rn: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b0010, false, rn, rd)
+}
+
+pub fn cmp<O>(rn: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b1010, true, rn, R0)
+}
+
+pub fn mov<O>(rd: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b1101, false, R0, rd)
+}
+
+pub fn and<O>(rd: Register, rn: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b0000, false, rn, rd)
+}
+
+pub fn orr<O>(rd: Register, rn: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b1100, false, rn, rd)
+}
+
+pub fn tst<O>(rn: Register, operand2: O) -> Instruction
+where
+    O: Into<ShifterOperand>,
+{
+    instruction(operand2.into().code(), 0b1000, true, rn, R0)
+}
+
+pub fn mul(rd: Register, rm: Register, rs: Register) -> Instruction {
+    Instruction::new(rm.shift(0) | 0b1001 << 4 | rs.shift(8) | rd.shift(16))
+}
+
+#[allow(unused)]
+pub fn nop() -> Instruction {
+    mov(R0, R0) // fixme not actually the NOP command
+}
+
+#[allow(unused)]
+pub fn raw(addr: u32) -> Instruction {
+    Instruction::Raw(addr)
+}

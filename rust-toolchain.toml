@@ -1,0 +1,5 @@
+# Known-good nightly used by ctru-rs CI. Do not change without rebuilding on hardware.
+[toolchain]
+channel = "nightly-2025-07-25"
+components = ["rust-src"]
+profile = "minimal"

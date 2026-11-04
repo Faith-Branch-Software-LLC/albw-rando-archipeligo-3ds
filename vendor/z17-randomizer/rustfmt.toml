@@ -1,0 +1,16 @@
+enum_discrim_align_threshold = 25
+edition = "2021"
+fn_params_layout = "Compressed"
+format_macro_matchers = true
+#imports_layout = "Mixed"
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+max_width = 120
+match_block_trailing_comma = true
+overflow_delimited_expr = true
+reorder_imports = true
+reorder_modules = true
+short_array_element_width_threshold = 50
+use_field_init_shorthand = true
+use_small_heuristics = "Max"
+version = "Two"

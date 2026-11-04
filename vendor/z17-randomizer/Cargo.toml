@@ -1,0 +1,68 @@
+[package]
+name = "albw-randomizer"
+version = "0.4.0"
+authors = [
+    "Kevin Marsolais <kevin@kevinmarsolais.co>",
+    "Rick Fay <rickwithanh@gmail.com>",
+    "Caroline Madsen <randomsalience@gmail.com>",
+]
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "albwrandomizer"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cli = { workspace = true }
+game = { workspace = true }
+log = { workspace = true }
+macros = { workspace = true }
+modinfo = { workspace = true }
+pyo3 = { version = "0.27.2", features = ["extension-module", "generate-import-lib"] }
+rand = { workspace = true }
+randomizer = { path = "./randomizer" }
+rom = { workspace = true }
+simplelog = "0.12.2"
+structopt = "0.3.26"
+time = "0.3.36"
+
+[build-dependencies]
+winres = "0.1"
+
+[workspace]
+members = [
+    "bytey",
+    "bytey-macro",
+    "cli",
+    "game",
+    "jack",
+    "macros",
+    "modinfo",
+    "randomizer",
+    "rom",
+]
+
+[workspace.dependencies]
+byteorder = "1.4.3"
+bytey = { path = "./bytey" }
+cli = { path = "./cli" }
+game = { path = "./game" }
+jack = { path = "./jack" }
+log = "0.4.19"
+macros = { path = "./macros" }
+modinfo = { path = "./modinfo" }
+path-absolutize = "3.1.0"
+pyo3 = { version = "0.27.2", features = ["extension-module", "generate-import-lib"] }
+rand = { version = "0.8.5", features = ["std_rng"] }
+rom = { path = "./rom" }
+serde = { version = "1.0.183", features = ["derive"] }
+serde_json = "1.0.104"
+strum = { version = "0.25.0", features = ["derive"] }
+yaz0 = "0.3.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

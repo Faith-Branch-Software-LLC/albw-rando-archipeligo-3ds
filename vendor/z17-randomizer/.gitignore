@@ -1,0 +1,9 @@
+/target/
+/.idea/
+/test.3ds
+/generated/
+/*.3ds
+/presets/Test.json
+/presets/*_spoiler.json
+/ref/decomp/
+/release

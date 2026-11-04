@@ -1,0 +1,8 @@
+/target/
+*.3dsx
+*.smdh
+*.elf
+*.cia
+# Never commit game data or ROM dumps.
+*.3ds
+*.cci

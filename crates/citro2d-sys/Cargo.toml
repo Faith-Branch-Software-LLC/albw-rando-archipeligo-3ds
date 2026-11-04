@@ -1,0 +1,12 @@
+[package]
+name = "citro2d-sys"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+links = "citro2d"
+
+[dependencies]
+ctru-sys = { workspace = true }
+
+[build-dependencies]
+cc = "1"

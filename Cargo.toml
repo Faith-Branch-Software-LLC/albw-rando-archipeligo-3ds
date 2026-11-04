@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/app-3ds", "crates/citro2d-sys"]
+
+[workspace.dependencies]
+ctru-rs = { git = "https://github.com/rust3ds/ctru-rs", rev = "618776d02995444b00b84a5518240f16ea9c2c5e" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs", rev = "618776d02995444b00b84a5518240f16ea9c2c5e" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

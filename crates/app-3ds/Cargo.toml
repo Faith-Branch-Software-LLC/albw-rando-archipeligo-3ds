@@ -1,0 +1,15 @@
+[package]
+name = "app-3ds"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "A Link Between Worlds randomizer and Archipelago patcher"
+authors = ["Sebastian Neiswanger"]
+
+[[bin]]
+name = "albw-rando"
+path = "src/main.rs"
+
+[dependencies]
+citro2d-sys = { path = "../citro2d-sys" }
+ctru-rs = { workspace = true }
