@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "python", feature(cfg_eval))]
 use crate::filler::filler_item::Vane;
 use crate::filler::tower_stage::TowerStage;
 use crate::filler::location::Location;
@@ -22,6 +23,7 @@ use macros::fail;
 use modinfo::Settings;
 use patch::Patcher;
 use path_absolutize::*;
+#[cfg(feature = "python")]
 use pyo3::{prelude::*, exceptions::PyRuntimeError};
 use rand::{rngs::StdRng, SeedableRng};
 use regions::Subregion;
@@ -41,6 +43,7 @@ use twox_hash::XxHash64;
 
 pub mod constants;
 pub mod filler;
+pub mod progress;
 pub mod hints;
 mod metrics;
 mod patch;
@@ -111,6 +114,7 @@ impl From<system::Error> for Error {
     }
 }
 
+#[cfg(feature = "python")]
 impl From<Error> for PyErr {
     fn from(err: Error) -> PyErr {
         PyRuntimeError::new_err(format!("{:?}", err.inner))
@@ -330,7 +334,7 @@ pub struct Text {
 }
 
 #[derive(Serialize, Debug, Clone)]
-#[pyclass]
+#[cfg_attr(feature = "python", cfg_eval, pyclass)]
 pub struct ArchipelagoItem {
     pub name: String,
     pub player_name: String,
@@ -346,9 +350,9 @@ pub enum ClassificationType {
     Trap,
 }
 
-#[pymethods]
+#[cfg_attr(feature = "python", cfg_eval, pymethods)]
 impl ArchipelagoItem {
-    #[new]
+    #[cfg_attr(feature = "python", new)]
     pub fn new(name: String, player_name: String, classification: u8, location_code: u16) -> ArchipelagoItem {
         ArchipelagoItem {name, player_name, classification, location_code}
     }
@@ -380,18 +384,18 @@ impl ArchipelagoItem {
 }
 
 #[derive(Serialize, Default, Debug, Clone)]
-#[pyclass]
+#[cfg_attr(feature = "python", cfg_eval, pyclass)]
 pub struct ArchipelagoInfo {
-    #[pyo3(get, set)]
+    #[cfg_attr(feature = "python", pyo3(get, set))]
     pub name: String,
 
-    #[pyo3(get, set)]
+    #[cfg_attr(feature = "python", pyo3(get, set))]
     pub items: DashMap<String, ArchipelagoItem>,
 }
 
-#[pymethods]
+#[cfg_attr(feature = "python", cfg_eval, pymethods)]
 impl ArchipelagoInfo {
-    #[new]
+    #[cfg_attr(feature = "python", new)]
     pub fn new() -> ArchipelagoInfo {
         ArchipelagoInfo::default()
     }
@@ -407,7 +411,7 @@ impl ArchipelagoInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-#[pyclass]
+#[cfg_attr(feature = "python", cfg_eval, pyclass)]
 pub struct SeedInfo {
     #[serde(default)]
     pub seed: u32,
@@ -439,7 +443,7 @@ pub struct SeedInfo {
     pub crack_map: CrackMap,
 
     #[serde(skip_deserializing, rename = "weather_vane_map")]
-    #[pyo3(get)]
+    #[cfg_attr(feature = "python", pyo3(get))]
     pub vane_map: VaneMap,
 
     #[serde(skip_deserializing)]
@@ -536,6 +540,24 @@ pub fn generate_seed(
     Ok(())
 }
 
+/// Runs the fill only, with no ROM access. Native entry point for the 3DS app.
+pub fn build_seed(seed: u32, settings: Settings) -> Result<SeedInfo> {
+    validate_settings(&settings)?;
+    let rng = &mut StdRng::seed_from_u64(seed as u64);
+    let hash = SeedHash::new(seed, &settings);
+    calculate_seed_info(seed, settings, hash, rng)
+}
+
+/// Patches an already loaded game into `output`. Native entry point for the 3DS app.
+pub fn patch_loaded(seed_info: &SeedInfo, game: Rom, output: &std::path::Path, progress: patch::ProgressHost<'_>) -> Result<()> {
+    let mut patcher = Patcher::new(game)?;
+    if rom::spill::active() {
+        patcher = patcher.stream_to(output);
+    }
+    let patches = patcher.prepare(seed_info, progress)?;
+    patches.dump(output)
+}
+
 /// A hash used in-game to quickly verify that two players are playing the same seed.
 ///
 /// The hash is calculated as `u64`, truncated to `u16` (5 digits), then converted to a Symbolic form that can be
@@ -547,6 +569,11 @@ pub struct SeedHash {
 }
 
 impl SeedHash {
+    /// The hash as plain text, which the game also shows on the file select screen.
+    pub fn text(&self) -> &str {
+        &self.text_hash
+    }
+
     pub fn new(seed: u32, settings: &Settings) -> Self {
         // Calculate underlying Hash
         let mut hasher = XxHash64::default();
@@ -687,13 +714,15 @@ fn calculate_seed_info(seed: u32, settings: Settings, hash: SeedHash, rng: &mut 
     filler::fill_all_locations_reachable(rng, &mut seed_info, check_map)?;
 
     // Post-analysis: Metrics and Hints
+    progress::report("Calculating metrics", 0, 0);
     metrics::calculate_metrics(&mut seed_info, check_map)?;
+    progress::report("Generating hints", 0, 0);
     hints::generate_hints(rng, &mut seed_info, check_map);
 
     Ok(seed_info)
 }
 
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn randomize_pre_fill(seed: u32, settings: Settings, archipelago_info: Option<ArchipelagoInfo>) -> SeedInfo {
     let rng = &mut StdRng::seed_from_u64(seed.clone() as u64);
     let hash = SeedHash::new(seed.clone(), &settings);
@@ -725,7 +754,7 @@ pub fn randomize_pre_fill(seed: u32, settings: Settings, archipelago_info: Optio
     }
 }
 
-#[pymethods]
+#[cfg_attr(feature = "python", cfg_eval, pymethods)]
 impl SeedInfo {
     pub fn get_region_graph(&self) -> DashMap<String, (String, Vec<String>, Vec<String>)> {
         self.world_graph.iter().map(|(location, location_node)|
@@ -789,6 +818,7 @@ impl SeedInfo {
         filler::build_layout(self, &mut check_map).unwrap();
     }
 
+    #[cfg(feature = "python")]
     pub fn patch<'py>(&self, rom_path: &str, out_path: &str, py: Python) -> Result<(), PyErr> {
         let user_config = UserConfig::new(rom_path.into(), out_path.into());
         match std::panic::catch_unwind(|| patch_seed(self, &user_config, false, true, Some(py))) {
@@ -821,7 +851,7 @@ impl SeedInfo {
     }
 }
 
-pub fn patch_seed(seed_info: &SeedInfo, user_config: &UserConfig, no_patch: bool, no_spoiler: bool, py: Option<Python>) -> Result<()> {
+pub fn patch_seed(seed_info: &SeedInfo, user_config: &UserConfig, no_patch: bool, no_spoiler: bool, py: patch::ProgressHost<'_>) -> Result<()> {
     info!("");
 
     if !no_patch {

@@ -141,7 +141,8 @@ pub fn decompress(file: &[u8]) -> Result<Vec<u8>> {
 
 pub fn compress(file: &[u8]) -> Vec<u8> {
     let size = file.len() as u32;
-    let mut out = Vec::new();
+    // Output is usually about this size, and starting here avoids most regrowth in tight memory.
+    let mut out = Vec::with_capacity(file.len() / 2 + 64);
     out.extend_from_slice(b"Yaz0");
     out.extend_from_slice(&size.to_be_bytes());
     out.extend_from_slice(&[0; 8]);

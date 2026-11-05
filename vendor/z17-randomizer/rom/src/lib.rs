@@ -6,6 +6,7 @@ use std::{
     fmt::{self, Display, Formatter},
     fs, io,
     path::Path,
+    rc::Rc,
 };
 
 use log::info;
@@ -41,6 +42,7 @@ pub mod h3d;
 pub mod item;
 pub mod language;
 pub mod scene;
+pub mod spill;
 
 pub type Result<T, E = Error> = ::std::result::Result<T, E>;
 
@@ -99,13 +101,40 @@ pub enum ErrorKind {
     Io,
 }
 
+/// Where game files come from.
+#[derive(Debug)]
+pub(crate) enum RomSource {
+    /// A decrypted NCSD image (`.3ds` or `.cci`).
+    Image(RomFs<fs::File>),
+    /// A RomFS mounted by the OS. Holds the path prefix.
+    Mounted(String),
+}
+
+impl RomSource {
+    pub(crate) fn read<P>(&mut self, path: P) -> Result<File<Box<[u8]>>>
+    where
+        P: Into<String>,
+    {
+        match self {
+            Self::Image(romfs) => romfs.read(path),
+            Self::Mounted(root) => {
+                let path = path.into();
+                let relative = path.strip_prefix('/').unwrap_or(&path);
+                let data = fs::read(format!("{root}{relative}"))
+                    .map_err(|err| Error::new(format!("Could not read '{relative}': {err}")))?;
+                Ok(File::new(path, data.into_boxed_slice()))
+            }
+        }
+    }
+}
+
 /// Game info, loaded from a ROM
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Rom {
     id: u64,
     exheader: ExHeader,
-    romfs: RefCell<RomFs<fs::File>>,
+    romfs: Rc<RefCell<RomSource>>,
     flow_chart: File<FlowChart>,
     get_item: File<Vec<GetItem>>,
     message: File<Load>,
@@ -121,23 +150,37 @@ impl Rom {
         P: AsRef<Path>,
     {
         let path = path.as_ref().to_path_buf();
-        info!("Loading ROM from:               {}", &path.absolutize()?.display());
+        // The current directory may be unavailable on a 3DS, so a failure here only skips the message.
+        if let Ok(absolute) = path.absolutize() {
+            info!("Loading ROM from:               {}", absolute.display());
+        }
         let mut cxi = Cxi::open(&path)?;
         if cxi.id() == US_ID {
             let id = cxi.id();
             let exheader = cxi.exheader()?;
-            let mut romfs = cxi.try_into_romfs()?;
-            let region_boot = romfs.read("US/RegionBoot.szs")?.map(Sarc::from);
-            let flow_chart =
-                region_boot.get().read("World/Byaml/FlowChart.byaml")?.try_map(|data| byaml::from_bytes(&data))?;
-            let get_item =
-                region_boot.get().read("World/Byaml/GetItem.byaml")?.try_map(|data| byaml::from_bytes(&data))?;
-            let message =
-                region_boot.get().read("World/Byaml/Message.byaml")?.try_map(|data| byaml::from_bytes(&data))?;
-            Ok(Self { id, exheader, romfs: RefCell::new(romfs), flow_chart, get_item, message })
+            let romfs = cxi.try_into_romfs()?;
+            Self::from_source(id, exheader, RomSource::Image(romfs))
         } else {
             Err(Error::new("Invalid ROM ID."))
         }
+    }
+
+    /// Loads the game from a mounted RomFS, such as an installed title or cartridge on a 3DS.
+    ///
+    /// `root` is the mount prefix, for example `"albw:/"`. A mounted title gives no access to
+    /// its extended header, so the caller supplies those bytes.
+    pub fn load_mounted(root: impl Into<String>, exheader: &[u8]) -> Result<Self> {
+        let exheader = ExHeader::from_slice(exheader).ok_or_else(|| Error::new("Invalid extended header length."))?;
+        Self::from_source(US_ID, exheader, RomSource::Mounted(root.into()))
+    }
+
+    fn from_source(id: u64, exheader: ExHeader, mut romfs: RomSource) -> Result<Self> {
+        let region_boot = romfs.read("US/RegionBoot.szs")?.map(Sarc::from);
+        let flow_chart =
+            region_boot.get().read("World/Byaml/FlowChart.byaml")?.try_map(|data| byaml::from_bytes(&data))?;
+        let get_item = region_boot.get().read("World/Byaml/GetItem.byaml")?.try_map(|data| byaml::from_bytes(&data))?;
+        let message = region_boot.get().read("World/Byaml/Message.byaml")?.try_map(|data| byaml::from_bytes(&data))?;
+        Ok(Self { id, exheader, romfs: Rc::new(RefCell::new(romfs)), flow_chart, get_item, message })
     }
 
     /// Gets the 64-bit title ID.
@@ -208,8 +251,10 @@ impl Rom {
         let mut romfs = self.romfs.borrow_mut();
         let stage =
             romfs.read(format!("World/Byaml/{}_stage.byaml", name))?.try_map(|data| byaml::from_bytes(&data))?;
-        let actors = romfs.read(format!("Archive/{}.szs", name))?.map(Sarc::from);
-        Ok(Scene::new(stage, actors))
+        // Most scenes never touch their archive, so it stays on the ROM until first use.
+        let path = format!("Archive/{}.szs", name);
+        let actors = File::new(path.clone(), Sarc::lazy(self.romfs.clone(), path));
+        Ok(Scene::new(stage, actors, self.romfs.clone()))
     }
 
     pub(crate) fn scene_meta(&self, course: CourseId) -> Option<SceneMeta> {

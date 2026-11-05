@@ -101,38 +101,42 @@ pub(crate) fn patch(patcher: &mut Patcher, seed_info: &SeedInfo) -> crate::Resul
     info!("Patching Randomized Checks...");
 
     // todo unravel this
-    dungeons::dark::patch(patcher, seed_info)?;
-    dungeons::desert::patch(patcher, seed_info)?;
-    dungeons::eastern::patch(patcher, seed_info)?;
-    dungeons::house::patch(patcher, seed_info)?;
-    dungeons::hyrule::patch(patcher, seed_info)?;
-    dungeons::ice::patch(patcher, seed_info)?;
-    dungeons::lorule::patch(patcher, seed_info)?;
-    dungeons::skull::patch(patcher, seed_info)?;
-    dungeons::swamp::patch(patcher, seed_info)?;
-    dungeons::thieves::patch(patcher, seed_info)?;
-    dungeons::tower::patch(patcher, seed_info)?;
-    dungeons::turtle::patch(patcher, seed_info)?;
-
-    hyrule::death::patch(patcher, seed_info)?;
-    hyrule::desert::patch(patcher, seed_info)?;
-    hyrule::eastern::patch(patcher, seed_info)?;
-    hyrule::field::patch(patcher, seed_info)?;
-    hyrule::irene::patch(patcher, seed_info)?;
-    hyrule::kakariko::patch(patcher, seed_info)?;
-    hyrule::lake::patch(patcher, seed_info)?;
-    hyrule::lost::patch(patcher, seed_info)?;
-    hyrule::ravio::patch(patcher, seed_info)?;
-    hyrule::river::patch(patcher, seed_info)?;
-    hyrule::southern::patch(patcher, seed_info)?;
-
-    lorule::dark::patch(patcher, seed_info)?;
-    lorule::death::patch(patcher, seed_info)?;
-    lorule::field::patch(patcher, seed_info)?;
-    lorule::graveyard::patch(patcher, seed_info)?;
-    lorule::lake::patch(patcher, seed_info)?;
-    lorule::misery::patch(patcher, seed_info)?;
-    lorule::skull::patch(patcher, seed_info)?;
+    let steps: [fn(&mut Patcher, &SeedInfo) -> crate::Result<()>; 30] = [
+        dungeons::dark::patch,
+        dungeons::desert::patch,
+        dungeons::eastern::patch,
+        dungeons::house::patch,
+        dungeons::hyrule::patch,
+        dungeons::ice::patch,
+        dungeons::lorule::patch,
+        dungeons::skull::patch,
+        dungeons::swamp::patch,
+        dungeons::thieves::patch,
+        dungeons::tower::patch,
+        dungeons::turtle::patch,
+        hyrule::death::patch,
+        hyrule::desert::patch,
+        hyrule::eastern::patch,
+        hyrule::field::patch,
+        hyrule::irene::patch,
+        hyrule::kakariko::patch,
+        hyrule::lake::patch,
+        hyrule::lost::patch,
+        hyrule::ravio::patch,
+        hyrule::river::patch,
+        hyrule::southern::patch,
+        lorule::dark::patch,
+        lorule::death::patch,
+        lorule::field::patch,
+        lorule::graveyard::patch,
+        lorule::lake::patch,
+        lorule::misery::patch,
+        lorule::skull::patch,
+    ];
+    for (done, step) in steps.into_iter().enumerate() {
+        crate::progress::report("Patching regions", done as u32, steps.len() as u32);
+        step(patcher, seed_info)?;
+    }
     Ok(())
 }
 

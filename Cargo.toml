@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/app-3ds", "crates/citro2d-sys"]
+members = ["crates/app-3ds", "crates/citro2d-sys", "crates/spike-3ds", "crates/fill-bench", "crates/block-pool", "crates/ui-core"]
+exclude = ["vendor"]
 
 [workspace.dependencies]
-ctru-rs = { git = "https://github.com/rust3ds/ctru-rs", rev = "618776d02995444b00b84a5518240f16ea9c2c5e" }
-ctru-sys = { git = "https://github.com/rust3ds/ctru-rs", rev = "618776d02995444b00b84a5518240f16ea9c2c5e" }
+# Pinned by Cargo.lock. pthread-3ds uses this exact URL with no rev, and Cargo needs one ctru-sys source.
+ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git" }
 
 [profile.release]
 opt-level = 3

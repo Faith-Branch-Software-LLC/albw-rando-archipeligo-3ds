@@ -1,0 +1,21 @@
+[package]
+name = "spike-3ds"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Measures randomizer time and memory on 3DS hardware"
+authors = ["Sebastian Neiswanger"]
+
+[[bin]]
+name = "albw-spike"
+path = "src/main.rs"
+
+[dependencies]
+block-pool = { path = "../block-pool" }
+citro2d-sys = { path = "../citro2d-sys" }
+ctru-rs = { workspace = true }
+ctru-sys = { workspace = true }
+modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
+randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
+rom = { path = "../../vendor/z17-randomizer/rom" }
+serde_json = "1"

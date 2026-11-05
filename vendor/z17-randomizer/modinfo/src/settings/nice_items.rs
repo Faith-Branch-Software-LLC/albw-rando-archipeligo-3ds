@@ -1,10 +1,11 @@
+#[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
 /// Setting for handling Nice Items and Mother Maiamai Rewards
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum NiceItems {
     /// Nice Items are obtained as upgrades from Mother Maiamai as in the vanilla game.
     Vanilla,

@@ -1,8 +1,8 @@
-use crate::{actors::Actors, files::sarc::Sarc, flag::Flag, File, Item, Result};
+use crate::{actors::Actors, files::sarc::Sarc, flag::Flag, File, Item, Result, RomSource};
 use game::Course;
 use serde::{de, ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Add;
-use std::{fmt, path::Path};
+use std::{cell::RefCell, fmt, path::Path, rc::Rc};
 
 #[derive(Debug)]
 pub struct Scene {
@@ -11,8 +11,8 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub(crate) fn new(stage: File<Stage>, actors: File<Sarc>) -> Self {
-        Self { actors: Actors::new(actors), stage }
+    pub(crate) fn new(stage: File<Stage>, actors: File<Sarc>, source: Rc<RefCell<RomSource>>) -> Self {
+        Self { actors: Actors::lazy(actors, source), stage }
     }
 
     pub fn actors(&self) -> &Actors {

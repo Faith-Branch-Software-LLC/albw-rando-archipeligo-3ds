@@ -6,3 +6,4 @@
 # Never commit game data or ROM dumps.
 *.3ds
 *.cci
+.DS_Store

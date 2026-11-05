@@ -12,6 +12,7 @@ use log::{debug, info};
 use macros::fail;
 use modinfo::settings::cracksanity::Cracksanity;
 use modinfo::settings::NiceItems;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use rand::seq::IteratorRandom;
 use rand::seq::SliceRandom;
@@ -346,7 +347,7 @@ pub fn generate_hints(rng: &mut StdRng, seed_info: &mut SeedInfo, check_map: &mu
 }
 
 /// Create a [`Hints`] object with hints from an external source
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn set_custom_hints(seed_info: &mut SeedInfo, hints: Vec<String>, bow_of_light_hint: String) {
     assert!(hints.len() == HintGhost::iter().len(), "Wrong number of hints: {}", hints.len());
 

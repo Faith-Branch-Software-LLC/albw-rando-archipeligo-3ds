@@ -98,6 +98,11 @@ impl Language {
         self.archive.get_mut().add(file)
     }
 
+    /// Moves the archive to disk until its next use.
+    pub fn spill(&self) -> Result<()> {
+        self.archive.get().spill()
+    }
+
     pub fn into_archive(self) -> File<Sarc> {
         self.archive.map(Sarc::compress)
     }

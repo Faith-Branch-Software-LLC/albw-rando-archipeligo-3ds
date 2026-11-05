@@ -8,13 +8,24 @@
 macro_rules! fail {
     (target: $target:expr, $($arg:tt)+) => ({
         log::error!(target: $target, $($arg)+);
-        cli::pause();
-        std::process::exit(1);
+        // A 3DS app has no console to pause on. Panicking lets the app show the message.
+        #[cfg(target_os = "horizon")]
+        panic!($($arg)+);
+        #[cfg(not(target_os = "horizon"))]
+        {
+            cli::pause();
+            std::process::exit(1);
+        }
     });
     ($($arg:tt)+) => ({
         log::error!($($arg)+);
-        cli::pause();
-        std::process::exit(1);
+        #[cfg(target_os = "horizon")]
+        panic!($($arg)+);
+        #[cfg(not(target_os = "horizon"))]
+        {
+            cli::pause();
+            std::process::exit(1);
+        }
     });
     () => ({
         cli::pause();

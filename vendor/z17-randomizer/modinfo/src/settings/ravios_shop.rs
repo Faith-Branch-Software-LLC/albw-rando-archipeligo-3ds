@@ -1,10 +1,11 @@
+#[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
 /// Ravio's Shop setting
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum RaviosShop {
     /// Closed Shop. Game starts post-Sanctuary, with Link waking up to Ravio in his house. Players must activate one
     /// of three triggers to fully open the shop, but the Bow Slot item can be gotten early with the "Signs" event.

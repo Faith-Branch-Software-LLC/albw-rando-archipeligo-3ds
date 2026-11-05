@@ -11,5 +11,11 @@ name = "albw-rando"
 path = "src/main.rs"
 
 [dependencies]
+block-pool = { path = "../block-pool" }
 citro2d-sys = { path = "../citro2d-sys" }
 ctru-rs = { workspace = true }
+ctru-sys = { workspace = true }
+modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
+randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
+rom = { path = "../../vendor/z17-randomizer/rom" }
+ui-core = { path = "../ui-core" }

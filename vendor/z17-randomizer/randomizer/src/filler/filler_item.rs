@@ -3,6 +3,7 @@ use crate::hints::{hint_color::HintColor::*, hint_ghost_name};
 use crate::patch::lms::msbf::MsbfKey;
 use crate::Result;
 use game::ghosts::HintGhost;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use rom::flag::Flag;
 use serde::{Serialize, Serializer};
@@ -410,32 +411,32 @@ impl Serialize for Randomizable {
 }
 
 #[derive (Clone)]
-#[pyclass]
+#[cfg_attr(feature = "python", cfg_eval, pyclass)]
 pub struct PyRandomizable {
     pub randomizable: Randomizable,
 }
 
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn new_item(item: Item) -> PyRandomizable {
     PyRandomizable { randomizable: Randomizable::Item(item) }
 }
 
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn new_archipelago_item(code: u16) -> PyRandomizable {
     PyRandomizable { randomizable: Randomizable::ArchipelagoItem(code) }
 }
 
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn new_goal(goal: Goal) -> PyRandomizable {
     PyRandomizable { randomizable: Randomizable::Goal(goal) }
 }
 
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn new_vane(vane: Vane) -> PyRandomizable {
     PyRandomizable { randomizable: Randomizable::Vane(vane) }
 }
 
-#[pyfunction]
+#[cfg_attr(feature = "python", pyfunction)]
 pub fn new_crack(crack: Crack) -> PyRandomizable {
     PyRandomizable { randomizable: Randomizable::Crack(crack) }
 }
@@ -446,7 +447,7 @@ impl From<PyRandomizable> for Randomizable {
     }
 }
 
-#[pymethods]
+#[cfg_attr(feature = "python", cfg_eval, pymethods)]
 impl PyRandomizable {
     fn item_id(&self) -> Option<u16> {
         match self.randomizable {
@@ -457,7 +458,7 @@ impl PyRandomizable {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum Item {
     Empty,
 
@@ -1465,7 +1466,7 @@ impl Serialize for Item {
 
 // Quest Items ---------------------------------------------------------------------------------
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum Goal {
     // Bosses -------
     Yuga,
@@ -1581,7 +1582,7 @@ impl Serialize for Goal {
 
 /// Weather Vane Item
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum Vane {
     BlacksmithWV,
     DarkPalaceWV,

@@ -1,10 +1,11 @@
+#[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
 /// Keysy removes locked keys and doors from dungeons if enabled.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum Keysy {
     /// Key doors remain as they are in vanilla.
     #[default]

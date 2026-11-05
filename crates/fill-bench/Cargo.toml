@@ -1,0 +1,13 @@
+[package]
+name = "fill-bench"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Times the randomizer fill on the host, as a baseline for 3DS measurements"
+
+[dependencies]
+block-pool = { path = "../block-pool" }
+modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
+randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
+rom = { path = "../../vendor/z17-randomizer/rom" }
+serde_json = "1"

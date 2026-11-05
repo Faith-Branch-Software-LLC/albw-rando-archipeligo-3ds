@@ -156,7 +156,7 @@ impl Ips {
         let offset = offset - self.offset;
         let data = data.as_ref();
         self.buf.extend_from_slice(&offset.to_be_bytes()[1..4]);
-        self.buf.extend_from_slice(&data.len().to_be_bytes()[6..8]);
+        self.buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
         self.buf.extend(data);
     }
 

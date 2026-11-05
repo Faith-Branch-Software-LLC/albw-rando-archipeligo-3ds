@@ -1,11 +1,12 @@
 use {
     super::{align, File, FromFile, IntoBytes, yaz0},
-    crate::{Error, Result},
+    crate::{spill, Error, Result, RomSource},
     bytey::*,
     log::debug,
     std::{
         cell::{Ref, RefCell},
         collections::BTreeMap,
+        rc::Rc,
     },
 };
 
@@ -15,6 +16,43 @@ pub struct Sarc(RefCell<Inner>);
 impl Sarc {
     pub fn from(data: Box<[u8]>) -> Self {
         Self(RefCell::new(Inner::Compressed(data)))
+    }
+
+    /// An archive that is read from the ROM on first use.
+    pub(crate) fn lazy(source: Rc<RefCell<RomSource>>, path: String) -> Self {
+        Self(RefCell::new(Inner::OnRom(source, path)))
+    }
+
+    /// Drops the loaded data of an unmodified lazy archive, given where it came from.
+    pub(crate) fn release(&self, source: &Rc<RefCell<RomSource>>, path: &str) {
+        if let Ok(mut inner) = self.0.try_borrow_mut() {
+            *inner = Inner::OnRom(source.clone(), path.to_owned());
+        }
+    }
+
+    /// Moves the loaded data to disk. It comes back on next use. On failure it stays in memory.
+    pub(crate) fn spill(&self) -> Result<()> {
+        let Ok(mut inner) = self.0.try_borrow_mut() else {
+            return Ok(());
+        };
+        let (data, compressed) = match std::mem::replace(&mut *inner, Inner::Compressed(Box::default())) {
+            Inner::Decompressed(archive) => (archive.to_spill(), false),
+            Inner::Compressed(data) => (data, true),
+            other => {
+                *inner = other;
+                return Ok(());
+            }
+        };
+        match spill::write(&data) {
+            Ok(path) => {
+                *inner = Inner::Spilled(path, compressed);
+                Ok(())
+            }
+            Err(err) => {
+                *inner = if compressed { Inner::Compressed(data) } else { Inner::Decompressed(Archive::from_spill(&data)) };
+                Err(err.into())
+            }
+        }
     }
 
     fn decompress(&self) -> Result<Ref<'_, Archive>> {
@@ -107,8 +145,14 @@ impl Sarc {
 
     pub fn compress(self) -> Self {
         match self.0.into_inner() {
+            Inner::OnRom(source, path) => Self::lazy(source, path),
             Inner::Compressed(data) => Self::from(data),
             Inner::Decompressed(archive) => Self::from(compress(&archive.into_bytes())),
+            Inner::Spilled(path, true) => Self::from(spill::take(&path).expect("spill file was just written")),
+            Inner::Spilled(path, false) => {
+                let data = spill::take(&path).expect("spill file was just written");
+                Self::from(compress(&Archive::from_spill(&data).into_bytes()))
+            }
         }
     }
 }
@@ -116,8 +160,15 @@ impl Sarc {
 impl IntoBytes for Sarc {
     fn into_bytes(self) -> Box<[u8]> {
         match self.0.into_inner() {
+            Inner::OnRom(source, path) => {
+                source.borrow_mut().read(path).expect("archive was readable when its scene loaded").into_inner()
+            }
             Inner::Compressed(data) => data,
             Inner::Decompressed(archive) => archive.into_bytes(),
+            Inner::Spilled(path, true) => spill::take(&path).expect("spill file was just written"),
+            Inner::Spilled(path, false) => {
+                Archive::from_spill(&spill::take(&path).expect("spill file was just written")).into_bytes()
+            }
         }
     }
 }
@@ -130,12 +181,23 @@ impl IntoBytes for Ref<'_, [u8]> {
 
 #[derive(Debug)]
 pub enum Inner {
+    OnRom(Rc<RefCell<RomSource>>, String),
     Compressed(Box<[u8]>),
     Decompressed(Archive),
+    /// On disk. The flag tells whether the bytes are still Yaz0 compressed.
+    Spilled(std::path::PathBuf, bool),
 }
 
 impl Inner {
     fn decompress(&mut self) -> Result<&mut Archive> {
+        if let Self::Spilled(path, compressed) = self {
+            let data = spill::take(path)?;
+            *self = if *compressed { Self::Compressed(data) } else { Self::Decompressed(Archive::from_spill(&data)) };
+        }
+        if let Self::OnRom(source, path) = self {
+            let data = source.borrow_mut().read(path.clone())?;
+            *self = Self::Compressed(data.into_inner());
+        }
         if let Self::Compressed(data) = self {
             *self = Self::Decompressed(Archive::from(
                 yaz0::decompress(&data)
@@ -201,6 +263,33 @@ impl Archive {
         }
     }
 
+    /// Writes every file with its exact length. SARC cannot do this, because its entries include
+    /// the padding after each file, and some game files reject that padding when read back.
+    fn to_spill(self) -> Box<[u8]> {
+        let size = 8 + self.files.values().map(|file| 8 + file.len()).sum::<usize>();
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(&self.multiplier.to_le_bytes());
+        out.extend_from_slice(&(self.files.len() as u32).to_le_bytes());
+        for (hash, file) in self.files {
+            out.extend_from_slice(&hash.to_le_bytes());
+            out.extend_from_slice(&(file.len() as u32).to_le_bytes());
+            out.extend_from_slice(&file);
+        }
+        out.into()
+    }
+
+    fn from_spill(data: &[u8]) -> Self {
+        let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+        let mut files = BTreeMap::new();
+        let mut at = 8;
+        for _ in 0..word(4) {
+            let (hash, len) = (word(at), word(at + 4) as usize);
+            files.insert(hash, data[at + 8..at + 8 + len].to_vec());
+            at += 8 + len;
+        }
+        Self { multiplier: word(0), files }
+    }
+
     fn hash(&self, path: &str) -> u32 {
         path.chars().fold(0, |hash, ch| (ch as u32) + hash.wrapping_mul(self.multiplier))
     }
@@ -235,7 +324,9 @@ impl Archive {
 impl IntoBytes for Archive {
     fn into_bytes(self) -> Box<[u8]> {
         let count = self.files.len() as u16;
-        let mut buf = vec![];
+        // Sizing this up front keeps a growing buffer from leaving holes in tight memory.
+        let data_size: usize = self.files.values().map(|file| align::<0x80>(file.len() as u32) as usize).sum();
+        let mut buf = Vec::with_capacity(0x100 + 0x10 * self.files.len() + data_size);
         buf.extend_from_slice(b"SARC");
         buf.extend_from_slice(&[0x14, 0, 0xFF, 0xFE]);
         buf.extend_from_slice(&[0, 0, 0, 0]);

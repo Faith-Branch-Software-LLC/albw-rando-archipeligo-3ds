@@ -1,10 +1,11 @@
+#[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
 /// Trial's Door
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
-#[pyclass(eq, eq_int, hash, frozen)]
+#[cfg_attr(feature = "python", cfg_eval, pyclass(eq, eq_int, hash, frozen))]
 pub enum TrialsDoor {
     /// The Trials Door will open by itself automatically, from inside LC only.
     OpenFromInsideOnly,

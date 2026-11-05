@@ -35,6 +35,8 @@ pub mod vanes;
 
 /// Fill Seed such that All Locations are Reachable
 ///
+use crate::progress::report;
+
 /// This is the "standard" filler algorithm for ALBWR.
 pub fn fill_all_locations_reachable(
     rng: &mut StdRng, seed_info: &mut SeedInfo, check_map: &mut CheckMap,
@@ -44,12 +46,15 @@ pub fn fill_all_locations_reachable(
     place_cracks(seed_info, check_map);
     place_weather_vanes(seed_info, check_map);
 
+    report("Checking reachability", 0, 0);
     verify_all_locations_accessible(seed_info, check_map, &mut progression_pool)?;
 
+    report("Preplacing items", 0, 0);
     preplace_items(rng, seed_info, check_map, &mut progression_pool)?;
     handle_exclusions(rng, seed_info, check_map, &mut junk_pool);
 
     assumed_fill(rng, seed_info, check_map, &mut progression_pool, &mut junk_pool)?;
+    report("Placing junk items", 0, 0);
     fill_junk(rng, check_map, &mut junk_pool)?;
 
     build_layout(seed_info, check_map)?;
@@ -815,8 +820,10 @@ fn assumed_fill(
 
     let mut reachable_checks = assumed_search(seed_info, items_owned, check_map);
     let mut major_maiamai_items = 0;
+    let total = items_owned.len() as u32;
 
     while exist_empty_reachable_check(&reachable_checks, check_map) && !items_owned.is_empty() {
+        report("Placing items", total - items_owned.len() as u32, total);
         let item = items_owned.remove(0);
 
         reachable_checks = assumed_search(seed_info, items_owned, check_map);

@@ -5,6 +5,11 @@ use bytey::*;
 pub struct ExHeader([u8; LEN]);
 
 impl ExHeader {
+    /// Builds an extended header from raw bytes. Returns `None` for a wrong length.
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        Some(Self(bytes.try_into().ok()?))
+    }
+
     pub fn get_text_address(&self) -> u32 {
         unsafe { u32::from_slice_unchecked(&self.0[0x10..]) }
     }

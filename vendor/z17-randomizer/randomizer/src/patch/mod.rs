@@ -1,9 +1,11 @@
 use crate::filler::cracks::Crack;
 use crate::filler::filler_item::{self, Randomizable, Vane};
+use crate::progress::report;
 use crate::regions;
 use crate::{patch::util::*, Error, Result, SeedInfo};
 use crate::patch::actors::{HEART_PIECES, HEART_CONTAINERS, SMALL_KEYS, RUPEES};
 use code::Code;
+#[cfg(feature = "desktop")]
 use fs_extra::dir::CopyOptions;
 use game::{
     Course::{self as CourseId, *},
@@ -13,6 +15,7 @@ use log::{debug, error, info};
 use macros::fail;
 use modinfo::settings::weather_vanes::WeatherVanes::*;
 use path_absolutize::*;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use rom::byaml::scene_env::SceneEnvFile;
 use rom::flag::Flag;
@@ -25,7 +28,14 @@ use rom::{
 };
 use serde::Serialize;
 use std::ops::Add;
-use std::{collections::HashMap, ffi::CString, fs, path::Path};
+#[cfg(feature = "python")]
+use std::ffi::CString;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
+#[cfg(feature = "desktop")]
 use tempfile::tempdir;
 use try_insert_ext::EntryInsertExt;
 
@@ -37,6 +47,12 @@ pub mod lms;
 mod messages;
 mod prizes;
 pub mod util;
+
+/// Where patch progress goes: the apworld's Tk window, or a native callback.
+#[cfg(feature = "python")]
+pub type ProgressHost<'a> = Option<Python<'a>>;
+#[cfg(not(feature = "python"))]
+pub type ProgressHost<'a> = Option<&'a dyn Fn(f32)>;
 
 #[non_exhaustive]
 pub struct DungeonPrizes {
@@ -59,6 +75,8 @@ pub struct Patcher {
     rentals: [Randomizable; 9],
     merchant: [Randomizable; 3],
     courses: HashMap<CourseId, Course>,
+    /// When set, finished files go here at once instead of waiting in memory.
+    stream_to: Option<PathBuf>,
 }
 
 impl Patcher {
@@ -70,7 +88,36 @@ impl Patcher {
             rentals: [Randomizable::Item(filler_item::Item::Empty); 9],
             merchant: [Randomizable::Item(filler_item::Item::Empty); 3],
             courses: Default::default(),
+            stream_to: None,
         })
+    }
+
+    /// Writes finished files under `output` as they are ready, to keep memory use low.
+    pub fn stream_to(mut self, output: &Path) -> Self {
+        self.stream_to = Some(moddir(output, self.game.id()).join("romfs"));
+        self
+    }
+
+    /// If over the memory budget, moves every archive except the one in use to disk.
+    fn make_room(&mut self, keep: Option<(CourseId, Option<u16>)>) {
+        if !rom::spill::over_limit() {
+            return;
+        }
+        if keep.is_some() {
+            log_spill(self.boot.spill());
+        }
+        for (id, course) in &self.courses {
+            let kept_course = keep.is_some_and(|(course, _)| course == *id);
+            if !kept_course {
+                log_spill(course.language.spill());
+            }
+            for (stage, scene) in &course.scenes {
+                let kept_scene = kept_course && keep.is_some_and(|(_, kept)| kept == Some(*stage));
+                if !kept_scene {
+                    log_spill(scene.actors().spill());
+                }
+            }
+        }
     }
 
     fn add_obj(&mut self, id: CourseId, stage_index: u16, obj: Obj) {
@@ -209,16 +256,18 @@ impl Patcher {
     }
 
     fn course(&mut self, course: CourseId) -> Result<&mut Course> {
+        self.make_room(Some((course, None)));
         let Self { game, courses, .. } = self;
-        Ok(courses.entry(course).or_insert(Self::load_course(game, course)))
+        Ok(courses.entry(course).or_insert_with(|| Self::load_course(game, course)))
     }
 
     /// Subtract 1 from stage
     fn scene(&mut self, course: CourseId, stage: u16) -> Result<&mut Scene> {
+        self.make_room(Some((course, Some(stage))));
         let Self { game, courses, .. } = self;
         courses
             .entry(course)
-            .or_insert(Self::load_course(game, course))
+            .or_insert_with(|| Self::load_course(game, course))
             .scenes
             .entry(stage)
             .or_try_insert_with(|| game.course(course).scene(stage))
@@ -227,7 +276,7 @@ impl Patcher {
 
     fn scene_meta(&mut self, course: CourseId) -> &mut SceneMeta {
         let Self { game, courses, .. } = self;
-        let Course { scene_meta, .. } = courses.entry(course).or_insert(Self::load_course(game, course));
+        let Course { scene_meta, .. } = courses.entry(course).or_insert_with(|| Self::load_course(game, course));
         scene_meta.as_mut().unwrap()
     }
 
@@ -252,7 +301,7 @@ impl Patcher {
     where
         C: Into<Option<CourseId>>,
     {
-        Ok(if let Some(course) = course.into() { &mut self.course(course)?.language } else { &mut self.boot })
+        Ok(if let Some(course) = course.into() { &mut self.course(course)?.language } else { self.make_room(None); &mut self.boot })
     }
 
     fn flow<C>(&mut self, course: C) -> Result<rom::language::LoadedMut<'_, FlowMut<'_>>>
@@ -596,31 +645,40 @@ impl Patcher {
         Ok(())
     }
 
-    pub fn prepare(self, seed_info: &SeedInfo, py: Option<Python>) -> Result<Patches> {
+    pub fn prepare(self, seed_info: &SeedInfo, py: ProgressHost<'_>) -> Result<Patches> {
         init_progress_bar(py);
         let result = self.prepare_inner(seed_info, py);
         destroy_progress_bar(py);
         result
     }
 
-    fn prepare_inner(mut self, seed_info: &SeedInfo, py: Option<Python>) -> Result<Patches> {
+    fn prepare_inner(mut self, seed_info: &SeedInfo, py: ProgressHost<'_>) -> Result<Patches> {
+        report("Patching regions", 0, 0);
         regions::patch(&mut self, seed_info)?;
+        report("Patching actors", 0, 0);
         actors::patch(&mut self, seed_info)?;
+        report("Patching event flow", 0, 0);
         lms::patch_msbp(&mut self)?;
         lms::msbf::patch(&mut self, seed_info)?;
+        report("Patching messages", 0, 0);
         messages::patch_messages(&mut self, seed_info)?;
+        report("Patching dungeon prizes", 0, 0);
         let prizes = get_dungeon_prizes(&seed_info.layout);
         prizes::patch_dungeon_prizes(&mut self, &prizes);
+        report("Patching item tables", 0, 0);
         byaml::get_item::patch(&mut self)?;
         byaml::course::patch(&mut self, &prizes, seed_info);
+        report("Patching stages", 0, 0);
         byaml::stage::patch(&mut self, seed_info)?;
         let scene_env_file = byaml::scene_env::patch(&mut self, &seed_info.settings);
+        report("Building cutscenes", 0, 0);
         let cutscenes = demo::build_replacement_cutscenes(seed_info)?;
 
         let mut common_archive = self.game.common()?;
         let mut item_actors = HashMap::new();
         let mut get_item_actors = Vec::new();
 
+        report("Patching item models", 0, 0);
         info!("Patching Item Actors...");
         for (item, get_item) in self.game.match_items_to_get_items() {
             if Item::SpecialMove.as_str().eq(&get_item.0) {
@@ -681,12 +739,33 @@ impl Patcher {
             }
         }
         
+        report("Patching code", 0, 0);
         info!("Patching Code...");
         let code = code::create(&self, seed_info);
 
+        report("Compressing files", 0, 0);
+        if rom::spill::clear_before_compress() {
+            log_spill(self.boot.spill());
+            log_spill(common_archive.spill());
+            for course in self.courses.values() {
+                log_spill(course.language.spill());
+                for scene in course.scenes.values() {
+                    log_spill(scene.actors().spill());
+                }
+            }
+        }
         info!("Creating romfs...");
-        let Self { game, boot, courses, .. } = self;
-        let mut romfs = Files(vec![]);
+        let Self { game, boot, courses, stream_to, .. } = self;
+        let mut romfs = Files { kept: vec![], stream_to };
+
+        // Item models and rental actors are all in their archives now.
+        drop(item_actors);
+        for actor in get_item_actors {
+            romfs.add(actor)?;
+        }
+        if rom::spill::over_limit() {
+            log_spill(common_archive.spill());
+        }
 
         // Add Actors to Common Archive
         //let mut common = game.common().unwrap();
@@ -709,44 +788,42 @@ impl Patcher {
         let step = 1.0 / (count as f32);
         let mut progress = 0.0;
 
-        romfs.add(boot.into_archive());
+        romfs.add(boot.into_archive())?;
         update_progress_bar(&mut progress, step, py);
         if let Some(common) = common_archive.into_archive() {
-            romfs.add(common);
+            romfs.add(common)?;
         }
         update_progress_bar(&mut progress, step, py);
         if let Some(scene_env_file) = scene_env_file {
-            romfs.add_serialize(scene_env_file.into_file());
+            romfs.add_serialize(scene_env_file.into_file())?;
             update_progress_bar(&mut progress, step, py);
         };
         for (_, Course { language, scenes, scene_meta }) in courses {
-            romfs.add(language.into_archive());
+            romfs.add(language.into_archive())?;
             update_progress_bar(&mut progress, step, py);
             if let Some(scene_meta) = scene_meta {
-                romfs.add_serialize(scene_meta.into_file());
+                romfs.add_serialize(scene_meta.into_file())?;
                 update_progress_bar(&mut progress, step, py);
             }
             for (_, scene) in scenes {
                 let (actors, stage) = scene.into_files();
                 if let Some(archive) = actors {
-                    romfs.add(archive);
+                    romfs.add(archive)?;
                 }
-                romfs.add_serialize(stage);
+                romfs.add_serialize(stage)?;
                 update_progress_bar(&mut progress, step, py);
             }
         }
         for cutscene in cutscenes {
-            romfs.add(cutscene);
+            romfs.add(cutscene)?;
             update_progress_bar(&mut progress, step, py);
-        }
-        for actor in get_item_actors {
-            romfs.add(actor);
         }
         Ok(Patches { game, code, romfs })
     }
 }
 
-fn init_progress_bar(py: Option<Python>) {
+#[cfg(feature = "python")]
+fn init_progress_bar(py: ProgressHost<'_>) {
     if let Some(py) = py {
         let _ = py.run(cr#"
 import tkinter
@@ -764,7 +841,8 @@ root.update()
     };
 }
 
-fn update_progress_bar(progress: &mut f32, step: f32, py: Option<Python>) {
+#[cfg(feature = "python")]
+fn update_progress_bar(progress: &mut f32, step: f32, py: ProgressHost<'_>) {
     *progress += step;
     if let Some(py) = py {
         let _ = py.run(
@@ -780,11 +858,27 @@ root.update()"#,
     }
 }
 
-fn destroy_progress_bar(py: Option<Python>) {
+#[cfg(feature = "python")]
+fn destroy_progress_bar(py: ProgressHost<'_>) {
     if let Some(py) = py {
         let _ = py.run(c"root.destroy()", None, None);
     }
 }
+
+#[cfg(not(feature = "python"))]
+fn init_progress_bar(_py: ProgressHost<'_>) {}
+
+/// Reports patch progress as a fraction from 0.0 to 1.0.
+#[cfg(not(feature = "python"))]
+fn update_progress_bar(progress: &mut f32, step: f32, py: ProgressHost<'_>) {
+    *progress += step;
+    if let Some(callback) = py {
+        callback(*progress);
+    }
+}
+
+#[cfg(not(feature = "python"))]
+fn destroy_progress_bar(_py: ProgressHost<'_>) {}
 
 /// Research MSBF and MSBT Files
 #[allow(unused)]
@@ -848,6 +942,25 @@ pub struct Patches {
 }
 
 impl Patches {
+    /// Writes straight into the output folder. The caller owns any atomic move.
+    #[cfg(not(feature = "desktop"))]
+    pub fn dump<P>(self, path: P) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        let moddir = moddir(path.as_ref(), self.game.id());
+        let romfs = moddir.join("romfs");
+        fs::create_dir_all(&romfs)?;
+        self.code.dump(&moddir, self.game.exheader())?;
+        let total = self.romfs.kept.len() as u32;
+        for (done, file) in self.romfs.kept.into_iter().enumerate() {
+            report("Writing files", done as u32, total);
+            file.dump(&romfs)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "desktop")]
     pub fn dump<P>(self, path: P) -> Result<()>
     where
         P: AsRef<Path>,
@@ -857,7 +970,7 @@ impl Patches {
         let romfs = moddir.join("romfs");
         fs::create_dir_all(&romfs)?;
         self.code.dump(&moddir, self.game.exheader())?;
-        for file in self.romfs.0 {
+        for file in self.romfs.kept {
             file.dump(&romfs)?;
         }
         let path = path.as_ref();
@@ -877,21 +990,43 @@ impl Patches {
     }
 }
 
+fn moddir(output: &Path, id: u64) -> PathBuf {
+    output.join(format!("{id:016X}"))
+}
+
+/// A failed spill only costs memory, so patching carries on.
+fn log_spill(result: rom::Result<()>) {
+    if let Err(err) = result {
+        log::warn!("Could not move an archive to disk: {err}");
+    }
+}
+
 #[derive(Debug)]
-struct Files(Vec<File<Box<[u8]>>>);
+struct Files {
+    kept: Vec<File<Box<[u8]>>>,
+    stream_to: Option<PathBuf>,
+}
 
 impl Files {
-    pub fn add<T>(&mut self, file: File<T>)
+    fn store(&mut self, file: File<Box<[u8]>>) -> Result<()> {
+        match &self.stream_to {
+            Some(folder) => file.dump(folder)?,
+            None => self.kept.push(file),
+        }
+        Ok(())
+    }
+
+    pub fn add<T>(&mut self, file: File<T>) -> Result<()>
     where
         T: IntoBytes,
     {
-        self.0.push(file.into_bytes());
+        self.store(file.into_bytes())
     }
 
-    pub fn add_serialize<T>(&mut self, file: File<T>)
+    pub fn add_serialize<T>(&mut self, file: File<T>) -> Result<()>
     where
         T: Serialize,
     {
-        self.0.push(file.serialize());
+        self.store(file.serialize())
     }
 }
