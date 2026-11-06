@@ -4,7 +4,9 @@
 //! main thread sleeps between frames, so the kernel lets it interrupt the work on time. A New 3DS
 //! gives the worker its own CPU core.
 
+mod art;
 mod draw;
+mod icons;
 mod job;
 mod memory;
 mod menu_screen;
@@ -15,14 +17,14 @@ use std::path::Path;
 
 use ctru::applets::swkbd::{Button, ButtonConfig, Kind as KeyboardKind, SoftwareKeyboard};
 use ctru::prelude::*;
-use ui_core::menu::{Action, Buttons, Input, Menu};
+use ui_core::menu::{Action, ModKind, Buttons, Input, Menu};
 use ui_core::presets::{self, Preset};
 
 const MB: f32 = 1024.0 * 1024.0;
 const WORKER_STACK: usize = 2 * 1024 * 1024;
 /// Memory left outside the pool for small objects and thread stacks.
 const OLD_3DS_RESERVE_MB: usize = 18;
-const NEW_3DS_RESERVE_MB: usize = 24;
+const NEW_3DS_RESERVE_MB: usize = 32;
 /// The heap measured on a real Old 3DS, used when simulating one.
 const OLD_3DS_HEAP: usize = 52 * 1024 * 1024;
 
@@ -165,8 +167,27 @@ fn main() {
 
     draw::start();
 
+    // The first launch reads the icons from the game, which takes a moment.
+    draw::frame(
+        || draw::text("Looking for your game...", 200.0, 110.0, 0.6, draw::WHITE, draw::CENTER),
+        || {},
+    );
+    let check = job::check_game();
+    let game_location = check.summary.clone();
+    let mut check_log = check.details.join("\n");
+    check_log.push_str(&format!("\n{game_location}\n"));
+    let (loaded_icons, icon_note) = icons::load(check);
+    check_log.push_str(&format!("{icon_note}\n"));
+    let (top_art, art_note) = art::load_top();
+    let mut display = art::load_display();
+    check_log.push_str(&format!("{art_note}\n{}\n", art::load_fonts(display.text)));
+    let _ = fs::write(job::CHECK_LOG, check_log);
+
     let (preset_list, notes) = load_presets();
     let mut menu = Menu::new(random_seed(), preset_list, !new_memory);
+    menu.set_mods(job::list_mods(job::MODEL_DIR), job::list_mods(job::VOICE_DIR));
+    menu.game_location = game_location;
+    menu.display = display;
     if !notes.is_empty() {
         menu.show_message("Preset Notes", &notes.join(" "));
     }
@@ -174,6 +195,23 @@ fn main() {
     let mut working: Option<progress::Screen> = None;
     let mut vblanks = 0u32;
     let mut autostart = Path::new(job::AUTOSTART).exists();
+    // For testing: the file's lines name a model, a voice, a seed number, and a preset.
+    if let Ok(text) = fs::read_to_string(job::AUTOSTART) {
+        let mut lines = text.lines();
+        menu.select_mod(ModKind::Model, lines.next().unwrap_or(""));
+        menu.select_mod(ModKind::Voice, lines.next().unwrap_or(""));
+        if let Some(seed) = lines.next().and_then(|line| line.parse().ok()) {
+            menu.seed = seed;
+        }
+        if let Some(preset) = lines.next() {
+            menu.select_preset(preset);
+        }
+    }
+
+    // For testing: opens a page of rules, to check how it looks.
+    if let Some(category) = fs::read_to_string(job::TEST_PAGE).ok().and_then(|text| text.trim().parse().ok()) {
+        menu.open_category(category);
+    }
 
     'app: while apt.main_loop() {
         hid.scan_input();
@@ -220,6 +258,8 @@ fn main() {
                     settings: menu.rules.settings(),
                     preset_name: menu.preset_name.clone(),
                     new_memory,
+                    model: menu.model().map(str::to_owned),
+                    voice: menu.voice().map(str::to_owned),
                 });
                 progress::reset();
                 randomizer::progress::set_hook(job::on_progress);
@@ -231,7 +271,12 @@ fn main() {
                 continue;
             }
         }
-        menu_screen::draw(&menu.view(), menu.page());
+        if menu.display != display {
+            art::resize_body_font(display.text, menu.display.text);
+            display = menu.display;
+            let _ = fs::write(art::DISPLAY, display.save());
+        }
+        menu_screen::draw(&menu.view(), &loaded_icons, top_art, display);
     }
     draw::stop();
 }

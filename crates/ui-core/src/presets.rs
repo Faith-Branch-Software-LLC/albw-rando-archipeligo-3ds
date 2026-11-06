@@ -23,7 +23,7 @@ const BUILT_IN: [(&str, &str, &str); 5] = [
         "Casual",
         "Friendly first seed: helpful starting items, clear chests, and no minigames.",
         r#"{"start_with_merge":true,"start_with_pouch":true,"bell_in_shop":true,"boots_in_shop":true,"assured_weapon":false,
-            "chest_size_matches_contents":true,"change_freestanding_models":true,"minigames_excluded":true,
+            "chest_size_matches_contents":true,"minigames_excluded":true,
             "skip_big_bomb_flower":true,"purple_potion_bottles":true,"hint_ghosts":"Always","weather_vanes":"All",
             "treacherous_tower_floors":5}"#,
     ),

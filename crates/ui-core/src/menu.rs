@@ -1,22 +1,23 @@
 //! Menu screens, focus, buttons, and touch. The app feeds in input and draws the returned view.
 
+use crate::display::{self, Display};
 use crate::presets::Preset;
 use crate::rules::{OptionDef, Rules, CATEGORIES, OPTIONS};
 
 pub const ROW_TOP: f32 = 8.0;
-pub const ROW_HEIGHT: f32 = 28.0;
+pub const ROW_HEIGHT: f32 = 34.0;
 pub const ROW_GAP: f32 = 3.0;
-pub const VISIBLE_ROWS: usize = 6;
+pub const VISIBLE_ROWS: usize = 5;
 pub const ROW_LEFT: f32 = 8.0;
 pub const ROW_WIDTH: f32 = 304.0;
 /// Touches on a row at or right of this x change its value instead of only opening it.
-pub const VALUE_LEFT: f32 = 190.0;
-pub const VALUE_CENTER: f32 = 250.0;
+pub const VALUE_LEFT: f32 = 208.0;
+pub const VALUE_CENTER: f32 = 258.0;
 
 const REPEAT_DELAY: u32 = 20;
 const REPEAT_EVERY: u32 = 5;
 const DRAG_START: f32 = 6.0;
-const HELP_WIDTH: usize = 56;
+const MOD_NAME_WIDTH: usize = 16;
 
 pub const COMPUTER_INSTRUCTIONS: &str = "github.com/rickfay/z17-randomizer";
 
@@ -65,9 +66,46 @@ pub enum Page {
     Categories,
     Options(usize),
     Presets,
+    Mods,
+    Display,
     Confirm,
     Message,
     About,
+}
+
+/// The two kinds of mod a seed can include.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ModKind {
+    Model,
+    Voice,
+}
+
+/// The mods found on the SD card, with the choice for one kind. Choice 0 is the original game.
+#[derive(Clone, Debug, Default)]
+struct ModChoice {
+    names: Vec<String>,
+    selected: usize,
+}
+
+impl ModChoice {
+    fn step(&mut self, delta: i32) {
+        let count = self.names.len() as i32 + 1;
+        self.selected = (self.selected as i32 + delta).rem_euclid(count) as usize;
+    }
+
+    fn name(&self) -> Option<&str> {
+        self.selected.checked_sub(1).map(|index| self.names[index].as_str())
+    }
+
+    fn text(&self) -> String {
+        match self.name() {
+            Some(name) if name.chars().count() > MOD_NAME_WIDTH => {
+                format!("{}...", name.chars().take(MOD_NAME_WIDTH - 3).collect::<String>())
+            }
+            Some(name) => name.to_owned(),
+            None => "Original".to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +113,8 @@ enum Target {
     Open(Page),
     Option(usize),
     Preset(usize),
+    Mod(ModKind),
+    Display(display::Setting),
     SavePreset,
     EditSeed,
     RandomSeed,
@@ -89,6 +129,7 @@ struct Row {
     value: Option<String>,
     help: String,
     target: Target,
+    icon: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +147,8 @@ pub struct RowView {
     pub focused: bool,
     /// The row changes a value when moved left or right.
     pub adjustable: bool,
+    /// The name of a game texture to show beside the label.
+    pub icon: Option<&'static str>,
 }
 
 /// Everything the app needs to draw a frame.
@@ -113,6 +156,7 @@ pub struct RowView {
 pub struct View {
     pub title: String,
     pub subtitle: String,
+    /// Paragraphs and lines of text. The app wraps each one to fit its font and box.
     pub body: Vec<String>,
     pub rows: Vec<RowView>,
     pub hint: String,
@@ -134,10 +178,25 @@ pub struct Menu {
     pub rules: Rules,
     pub seed: u32,
     pub preset_name: String,
+    /// Where the game was found, shown on the home page.
+    pub game_location: String,
+    /// Text sizes. The app saves them and reloads fonts when they change.
+    pub display: Display,
     presets: Vec<Preset>,
+    model: ModChoice,
+    voice: ModChoice,
     message: (String, Vec<String>),
     held_frames: u32,
     touch: Option<Touch>,
+}
+
+/// One paragraph of body text. The app wraps paragraphs to fit its font and box.
+fn paragraph(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![text.to_owned()]
+    }
 }
 
 /// Splits text into lines of at most `width` characters, at spaces.
@@ -160,7 +219,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 impl Menu {
-    /// `old_3ds` starts on a warning about what that console can do.
+    /// `old_3ds` starts on a notice about what that console can do.
     pub fn new(seed: u32, presets: Vec<Preset>, old_3ds: bool) -> Self {
         let mut stack = vec![Place { page: Page::Home, focus: 0, scroll: 0 }];
         if old_3ds {
@@ -171,7 +230,11 @@ impl Menu {
             rules: Rules::default(),
             seed,
             preset_name: "Standard".to_owned(),
+            game_location: String::new(),
+            display: Display::default(),
             presets,
+            model: ModChoice::default(),
+            voice: ModChoice::default(),
             message: (String::new(), Vec::new()),
             held_frames: 0,
             touch: None,
@@ -194,9 +257,55 @@ impl Menu {
         self.presets = presets;
     }
 
+    /// Opens a page of rules. For testing.
+    pub fn open_category(&mut self, category: usize) {
+        if category < CATEGORIES.len() {
+            self.stack.push(Place { page: Page::Options(category), focus: 0, scroll: 0 });
+        }
+    }
+
+    /// Loads the preset with this name, if there is one. For testing.
+    pub fn select_preset(&mut self, name: &str) {
+        if let Some(preset) = self.presets.iter().find(|preset| preset.name == name) {
+            self.rules = Rules::with_overrides(&preset.overrides);
+            self.preset_name = preset.name.clone();
+        }
+    }
+
+    /// Sets the mods found on the SD card.
+    pub fn set_mods(&mut self, models: Vec<String>, voices: Vec<String>) {
+        self.model = ModChoice { names: models, selected: 0 };
+        self.voice = ModChoice { names: voices, selected: 0 };
+    }
+
+    fn mod_choice(&mut self, kind: ModKind) -> &mut ModChoice {
+        match kind {
+            ModKind::Model => &mut self.model,
+            ModKind::Voice => &mut self.voice,
+        }
+    }
+
+    /// Selects a mod by name, if the SD card has it.
+    pub fn select_mod(&mut self, kind: ModKind, name: &str) {
+        let choice = self.mod_choice(kind);
+        if let Some(index) = choice.names.iter().position(|found| found == name) {
+            choice.selected = index + 1;
+        }
+    }
+
+    /// The selected player model's folder name, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.name()
+    }
+
+    /// The selected voice pack's folder name, if any.
+    pub fn voice(&self) -> Option<&str> {
+        self.voice.name()
+    }
+
     /// Opens a message page on top of the current page.
     pub fn show_message(&mut self, title: &str, text: &str) {
-        self.message = (title.to_owned(), wrap(text, HELP_WIDTH));
+        self.message = (title.to_owned(), paragraph(text));
         self.open(Page::Message);
     }
 
@@ -222,6 +331,7 @@ impl Menu {
             value: Some(self.rules.value_text(option)),
             help: option.help.to_owned(),
             target: Target::Option(index),
+            icon: crate::icons::for_option(option.key),
         }
     }
 
@@ -231,18 +341,21 @@ impl Menu {
             value,
             help: help.to_owned(),
             target,
+            icon: None,
         };
         match self.page() {
             Page::OldWarning => vec![
-                row("Continue anyway", None, "", Target::Back),
+                row("Continue", None, "", Target::Back),
                 row("Exit", None, "", Target::Exit),
             ],
             Page::Home => vec![
                 row("Make a Seed", None, "Review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
                 row("Rules", None, "Change every option by hand.", Target::Open(Page::Categories)),
                 row("Presets", Some(self.preset_name.clone()), "Load a set of rules, or save your own to share.", Target::Open(Page::Presets)),
+                row("Models and Voices", None, "Choose a player model and voice pack for this seed.", Target::Open(Page::Mods)),
                 row("Seed Number", Some(self.seed.to_string()), "The same number and rules make the same game on this console. Press A to type one.", Target::EditSeed),
                 row("New Random Seed", None, "Picks a new seed number.", Target::RandomSeed),
+                row("Display", None, "Text sizes for these menus.", Target::Open(Page::Display)),
                 row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
                 row("Exit", None, "Return to the Homebrew Launcher.", Target::Exit),
             ],
@@ -270,6 +383,19 @@ impl Menu {
                 rows.push(row("Save Current Rules", None, "Saves to /3ds/albw-rando/presets. Share that file, and others can copy it to the same folder.", Target::SavePreset));
                 rows
             }
+            Page::Mods => vec![
+                row("Player Model", Some(self.model.text()), "Add a mod as /3ds/albw-rando/models/<name>/romfs. It then appears here.", Target::Mod(ModKind::Model)),
+                row("Voice", Some(self.voice.text()), "Add a mod as /3ds/albw-rando/voices/<name>/romfs. It then appears here.", Target::Mod(ModKind::Voice)),
+            ],
+            Page::Display => vec![
+                row(
+                    "Text Size",
+                    Some(format!("{} px", self.display.text)),
+                    "Size of the text in rows, hints, and this box.",
+                    Target::Display(display::Setting::Text),
+                ),
+                row("Title Size", Some(format!("{} px", self.display.title)), "Size of page names like the one above.", Target::Display(display::Setting::Title)),
+            ],
             Page::Confirm => vec![
                 row("Start", None, "", Target::Generate),
                 row("Go Back", None, "", Target::Back),
@@ -298,6 +424,14 @@ impl Menu {
                 self.rules = Rules::with_overrides(&preset.overrides);
                 self.preset_name = preset.name.clone();
                 self.back()
+            }
+            Target::Mod(kind) => {
+                self.mod_choice(kind).step(1);
+                Action::None
+            }
+            Target::Display(setting) => {
+                self.display.step(setting, 1);
+                Action::None
             }
             Target::SavePreset => Action::SavePreset,
             Target::EditSeed => Action::EditSeed,
@@ -373,6 +507,16 @@ impl Menu {
                         self.adjust(option, delta);
                         Action::None
                     }
+                    Target::Mod(kind) => {
+                        let delta = if (VALUE_LEFT..VALUE_CENTER).contains(&x) { -1 } else { 1 };
+                        self.mod_choice(kind).step(delta);
+                        Action::None
+                    }
+                    Target::Display(setting) => {
+                        let delta = if (VALUE_LEFT..VALUE_CENTER).contains(&x) { -1 } else { 1 };
+                        self.display.step(setting, delta);
+                        Action::None
+                    }
                     target => self.activate(target),
                 }
             }
@@ -406,6 +550,22 @@ impl Menu {
             }
             if Self::repeats(pressed.right, held.right, frames) {
                 self.adjust(option, 1);
+            }
+        }
+        if let Some(Target::Mod(kind)) = focused {
+            if Self::repeats(pressed.left, held.left, frames) {
+                self.mod_choice(kind).step(-1);
+            }
+            if Self::repeats(pressed.right, held.right, frames) {
+                self.mod_choice(kind).step(1);
+            }
+        }
+        if let Some(Target::Display(setting)) = focused {
+            if Self::repeats(pressed.left, held.left, frames) {
+                self.display.step(setting, -1);
+            }
+            if Self::repeats(pressed.right, held.right, frames) {
+                self.display.step(setting, 1);
             }
         }
         if let Page::Options(category) = self.page() {
@@ -457,33 +617,46 @@ impl Menu {
                 label: row.label.clone(),
                 value: row.value.clone(),
                 focused: index == focus,
-                adjustable: matches!(row.target, Target::Option(_)),
+                adjustable: matches!(row.target, Target::Option(_) | Target::Mod(_) | Target::Display(_)),
+                icon: row.icon,
             })
             .collect();
 
         let (title, subtitle, body, hint): (String, String, Vec<String>, &str) = match place.page {
             Page::OldWarning => (
-                "Old 3DS Warning".to_owned(),
+                "Old 3DS Notice".to_owned(),
                 "This console may not finish".to_owned(),
-                wrap(
-                    &format!(
-                        "An Old 3DS can run out of memory while building a seed, which crashes the app. A full build can also take 30 minutes or more. If it crashes, make your seed on a computer. Follow the instructions at {COMPUTER_INSTRUCTIONS}"
-                    ),
-                    HELP_WIDTH,
-                ),
+                paragraph(&format!(
+                        "Building a seed takes much longer on an Old 3DS, so keep it plugged in. The Standard preset has been tested here, but other rules may need more memory. If the app crashes, make your seed on a computer. Follow the instructions at {COMPUTER_INSTRUCTIONS}"
+                    )),
                 "A Select   B Exit",
             ),
-            Page::Home => ("A Link Between Worlds".to_owned(), "Randomizer".to_owned(), wrap(help, HELP_WIDTH), "A Select   START Make a Seed"),
-            Page::Categories => ("Rules".to_owned(), format!("Preset: {}", self.preset_name), wrap(help, HELP_WIDTH), "A Open   B Back"),
+            Page::Home => {
+                let mut lines = paragraph(&self.game_location);
+                lines.push(String::new());
+                lines.extend(paragraph(help));
+                ("A Link Between Worlds".to_owned(), "Randomizer".to_owned(), lines, "A Select   START Make a Seed")
+            }
+            Page::Categories => ("Rules".to_owned(), format!("Preset: {}", self.preset_name), paragraph(help), "A Open   B Back"),
             Page::Options(category) => (
                 CATEGORIES[category].0.to_owned(),
                 format!("Preset: {}", self.preset_name),
-                wrap(help, HELP_WIDTH),
+                paragraph(help),
                 "Left/Right Change   L/R Page   B Back",
             ),
-            Page::Presets => ("Presets".to_owned(), format!("Current: {}", self.preset_name), wrap(help, HELP_WIDTH), "A Load   B Back"),
+            Page::Presets => ("Presets".to_owned(), format!("Current: {}", self.preset_name), paragraph(help), "A Load   B Back"),
+            Page::Display => ("Display".to_owned(), String::new(), paragraph(help), "Left/Right Change   B Back"),
+            Page::Mods => (
+                "Models and Voices".to_owned(),
+                "Mods keep their authors' credit".to_owned(),
+                paragraph(help),
+                "Left/Right Change   B Back",
+            ),
             Page::Confirm => {
                 let mut lines = vec![format!("Seed {}   Preset: {}", self.seed, self.preset_name)];
+                if self.model().is_some() || self.voice().is_some() {
+                    lines.push(format!("Model: {}   Voice: {}", self.model.text(), self.voice.text()));
+                }
                 let changes = self.rules.summary();
                 if changes.is_empty() {
                     lines.push("All rules are at their defaults.".to_owned());
@@ -506,6 +679,9 @@ impl Menu {
                     "Archipelago work: randomsalience".to_owned(),
                     "   github.com/randomsalience/z17-randomizer".to_owned(),
                     "3DS tools: devkitPro and rust3ds".to_owned(),
+                    "Models and voices belong to their authors.".to_owned(),
+                    "Fonts: Hylia Serif by Omni Jacala,".to_owned(),
+                    "   Reggae One by Fontworks (SIL OFL 1.1)".to_owned(),
                 ],
                 "A OK",
             ),
@@ -553,6 +729,30 @@ mod tests {
     }
 
     #[test]
+    fn mods_cycle_through_original_and_each_name() {
+        let mut menu = Menu::new(1, Vec::new(), false);
+        menu.set_mods(vec!["Wolf".to_owned(), "Deity".to_owned()], Vec::new());
+        assert_eq!(menu.model(), None);
+        menu.mod_choice(ModKind::Model).step(1);
+        assert_eq!(menu.model(), Some("Wolf"));
+        menu.mod_choice(ModKind::Model).step(1);
+        assert_eq!(menu.model(), Some("Deity"));
+        menu.mod_choice(ModKind::Model).step(1);
+        assert_eq!(menu.model(), None);
+        menu.mod_choice(ModKind::Model).step(-1);
+        assert_eq!(menu.model(), Some("Deity"));
+        // With no voices on the SD card, the choice stays on the original.
+        menu.mod_choice(ModKind::Voice).step(1);
+        assert_eq!(menu.voice(), None);
+    }
+
+    #[test]
+    fn long_mod_names_are_shortened_for_the_row() {
+        let choice = ModChoice { names: vec!["A very long mod folder name".to_owned()], selected: 1 };
+        assert_eq!(choice.text(), "A very long m...");
+    }
+
+    #[test]
     fn dpad_wraps_around_the_list() {
         let mut menu = menu();
         press(&mut menu, |b| b.up = true);
@@ -563,12 +763,13 @@ mod tests {
     #[test]
     fn long_lists_scroll_to_keep_focus_visible() {
         let mut menu = menu();
-        for _ in 0..6 {
+        // Exit is the ninth Home row, and five rows fit, so the list scrolls by four.
+        for _ in 0..8 {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }
         let view = menu.view();
-        assert_eq!(view.scroll, 1);
+        assert_eq!(view.scroll, 4);
         assert!(view.rows.iter().any(|row| row.focused && row.label == "Exit"));
     }
 
@@ -624,7 +825,7 @@ mod tests {
         assert_eq!(value(&menu), "Normal");
         tap(&mut menu, 300.0, row_y(0));
         assert_eq!(value(&menu), "Hard");
-        tap(&mut menu, 200.0, row_y(0));
+        tap(&mut menu, (VALUE_LEFT + VALUE_CENTER) / 2.0, row_y(0));
         assert_eq!(value(&menu), "Normal");
         assert_eq!(menu.preset_name, "Custom");
     }

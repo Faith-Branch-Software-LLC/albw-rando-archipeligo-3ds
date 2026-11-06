@@ -5,7 +5,7 @@ use std::{
     error::Error as StdError,
     fmt::{self, Display, Formatter},
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -41,6 +41,7 @@ pub mod font;
 pub mod h3d;
 pub mod item;
 pub mod language;
+pub mod mods;
 pub mod scene;
 pub mod spill;
 
@@ -108,6 +109,8 @@ pub(crate) enum RomSource {
     Image(RomFs<fs::File>),
     /// A RomFS mounted by the OS. Holds the path prefix.
     Mounted(String),
+    /// Mod folders that replace game files. The first folder with a file wins.
+    Overlaid(Vec<PathBuf>, Box<RomSource>),
 }
 
 impl RomSource {
@@ -123,6 +126,19 @@ impl RomSource {
                 let data = fs::read(format!("{root}{relative}"))
                     .map_err(|err| Error::new(format!("Could not read '{relative}': {err}")))?;
                 Ok(File::new(path, data.into_boxed_slice()))
+            }
+            Self::Overlaid(folders, game) => {
+                let path = path.into();
+                let relative = path.strip_prefix('/').unwrap_or(&path);
+                for folder in folders.iter() {
+                    let file = folder.join(relative);
+                    if file.is_file() {
+                        let data = fs::read(&file)
+                            .map_err(|err| Error::new(format!("Could not read '{}': {err}", file.display())))?;
+                        return Ok(File::new(path, data.into_boxed_slice()));
+                    }
+                }
+                game.read(path)
             }
         }
     }
@@ -207,6 +223,14 @@ impl Rom {
 
     pub fn match_items_to_get_items(&self) -> impl Iterator<Item = (Item, GetItem)> + '_ {
         Item::iter().zip(self.get_item.get().iter().cloned())
+    }
+
+    /// Makes the patcher see these mod folders as part of the game, so that it works from the
+    /// modded item models and text. The first folder with a file wins. Call this before patching.
+    pub fn overlay(&mut self, folders: Vec<PathBuf>) {
+        let mut source = self.romfs.borrow_mut();
+        let game = std::mem::replace(&mut *source, RomSource::Mounted(String::new()));
+        *source = RomSource::Overlaid(folders, Box::new(game));
     }
 
     pub fn open(&self, filename: &str) -> Vec<u8> {

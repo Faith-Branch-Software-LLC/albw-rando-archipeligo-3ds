@@ -127,6 +127,10 @@ fn patch_item_names(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
         }
     }
 
+    if seed_info.archipelago_info.is_none() {
+        patch_ravio_item_names(&mut item_name, seed_info)?;
+    }
+
     patcher.update(item_name.dump())?;
     patcher.update(item_name_upper.dump())?;
 
@@ -140,6 +144,27 @@ fn patch_item_names(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
     // item_name_upper.set("item_name_triforce_courage", "Earthquake");
     // patcher.update(item_name_upper.dump())?;
 
+    Ok(())
+}
+
+/// Makes "You interested in the ...?" name the item that is really in each of Ravio's slots.
+fn patch_ravio_item_names(item_name: &mut msbt::MsbtFile, seed_info: &SeedInfo) -> Result<()> {
+    const SLOTS: [(&str, &str); 9] = [
+        ("Ravio's Shop (1)", "icerod"),
+        ("Ravio's Shop (2)", "hookshot"),
+        ("Ravio's Shop (3)", "tornaderod"),
+        ("Ravio's Shop (4)", "bomb"),
+        ("Ravio's Shop (5)", "bow"),
+        ("Ravio's Shop (6)", "sandrod"),
+        ("Ravio's Shop (7)", "hammer"),
+        ("Ravio's Shop (8)", "boomerang"),
+        ("Ravio's Shop (9)", "firerod"),
+    ];
+    for (location, item) in SLOTS {
+        let name = seed_info.get_item_name(location, regions::hyrule::ravio::shop::SUBREGION)?;
+        item_name.set(&format!("item_name_{item}"), &name);
+        item_name.set(&format!("item_name_{item}_LV2"), &name);
+    }
     Ok(())
 }
 

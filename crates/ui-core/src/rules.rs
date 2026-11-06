@@ -80,7 +80,7 @@ pub const OPTIONS: &[OptionDef] = &[
     option("treacherous_tower_floors", "Treacherous Floors", 4, Kind::Number { min: 2, max: 66, step: 1 }, "How many floors Treacherous Tower has."),
     option("hint_ghosts", "Hint Ghosts", 5, Kind::Choice(&[("Off", "Off"), ("Always", "Always"), ("Glasses", "With Glasses")]), "When Hint Ghosts can be seen."),
     option("chest_size_matches_contents", "Chest Size Hints", 5, Kind::Toggle, "Large chests hold progression or unique items, and small chests hold the rest."),
-    option("change_freestanding_models", "True Item Models", 5, Kind::Toggle, "Heart Pieces, keys, and other loose items look like what they really are."),
+    option("change_freestanding_models", "True Item Models", 5, Kind::Toggle, "WARNING: Crashes the game at launch for now. Leave this off. Loose items look like what they really are."),
     option("purple_potion_bottles", "Purple Potion Bottles", 5, Kind::Toggle, "Fills every empty Bottle with a free Purple Potion."),
     option("night_mode", "Night Mode", 5, Kind::Toggle, "Experimental. Hyrule uses night colors until you visit Lorule."),
 ];

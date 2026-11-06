@@ -99,10 +99,11 @@ pub fn decompress(file: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(decompressed_size as usize);
     let mut position = 0;
 
+    // Some tools pad the end of the file, and those bytes are not compressed data.
     while let Some(chunk_header) = data.get(position) {
         position += 1;
         for i in 0..8 {
-            if position >= data.len() {
+            if position >= data.len() || out.len() >= decompressed_size as usize {
                 return Ok(out);
             }
 

@@ -13,6 +13,11 @@ struct Step {
     new_3ds_seconds: f32,
 }
 
+/// Phase names reported by the job itself.
+pub mod job_phase {
+    pub const ADDING_MODS: &str = "Adding models and voices";
+}
+
 const STEPS: [Step; 5] = [
     Step { label: "Placing items", new_3ds_seconds: 62.0 },
     Step { label: "Writing hints", new_3ds_seconds: 51.0 },
@@ -31,7 +36,7 @@ fn step_of(phase: &str) -> Option<usize> {
         "Patching actors" | "Patching event flow" | "Patching messages" | "Patching dungeon prizes"
         | "Patching item tables" | "Patching stages" | "Building cutscenes" | "Patching item models"
         | "Patching code" => 3,
-        "Compressing files" | "Writing files" => 4,
+        "Compressing files" | "Writing files" | job_phase::ADDING_MODS => 4,
         _ => return None,
     })
 }

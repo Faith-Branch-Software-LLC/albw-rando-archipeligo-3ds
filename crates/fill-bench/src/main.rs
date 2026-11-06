@@ -93,7 +93,9 @@ fn peak_mb() -> f32 {
 }
 
 fn default_settings() -> Settings {
-    let mut settings: Settings = serde_json::from_str("{}").expect("default settings");
+    // SETTINGS holds settings as JSON, for trying the rules from a console's run log.
+    let text = std::env::var("SETTINGS").unwrap_or_else(|_| "{}".to_owned());
+    let mut settings: Settings = serde_json::from_str(&text).expect("settings");
     // Matches src/main.rs in the upstream CLI.
     settings.yuganon_requirement = settings.lc_requirement;
     settings
@@ -106,7 +108,13 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
     println!("fill: {:.2} s, peak {:.1} MB", start.elapsed().as_secs_f32(), peak_mb());
 
     let start = Instant::now();
-    let game = rom::Rom::load(rom_path).expect("load ROM");
+    let mut game = rom::Rom::load(rom_path).expect("load ROM");
+    // MODS lists romfs folders to include, separated by colons.
+    let mods: Vec<std::path::PathBuf> =
+        std::env::var("MODS").map_or_else(|_| Vec::new(), |mods| mods.split(':').map(Into::into).collect());
+    if !mods.is_empty() {
+        game.overlay(mods.clone());
+    }
     randomizer::progress::set_hook(|phase, done, total| {
         if done == 0 {
             println!(
@@ -129,6 +137,11 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
     }
     randomizer::patch_loaded(&seed_info, game, Path::new(output), Some(&progress)).expect("patch");
     let stats = rom::spill::finish();
+    let romfs = Path::new(output).join("00040000000EC300/romfs");
+    for source in &mods {
+        let report = rom::mods::copy_missing(source, &romfs, &|_, _| {});
+        println!("mod {}: {report:?}", source.display());
+    }
     println!("patch: {:.2} s, overall peak {:.1} MB, {stats:?}", start.elapsed().as_secs_f32(), peak_mb());
     println!(
         "pool peak {:.1} MB, small peak {:.1} MB",

@@ -63,6 +63,7 @@ struct CountingAlloc;
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static REPORTED_OOM: AtomicBool = AtomicBool::new(false);
+static REPORTED_SMALL_FULL: AtomicBool = AtomicBool::new(false);
 static SMALL_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 /// Requests this big go to the pool, away from small objects that would split up the free space.
@@ -118,6 +119,10 @@ unsafe impl GlobalAlloc for CountingAlloc {
             return ptr;
         }
         if !large {
+            // C library calls cannot use this fallback, so a full small heap can still stop them.
+            if !REPORTED_SMALL_FULL.swap(true, Relaxed) {
+                crate::job::log("Small-object heap is full. Rust objects now use the pool.");
+            }
             let ptr = with_pool(|pool| pool.alloc(layout.size(), layout.align()));
             if !ptr.is_null() {
                 add(layout.size(), false);

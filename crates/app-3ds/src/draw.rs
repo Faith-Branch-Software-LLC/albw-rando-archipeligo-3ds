@@ -54,10 +54,108 @@ pub fn frame(top: impl FnOnce(), bottom: impl FnOnce()) {
     unsafe { c2d::shim_frame_end() };
 }
 
+/// Font slots, filled from the SD card by `load_font`. An empty slot uses the system font.
+#[derive(Clone, Copy)]
+pub enum Font {
+    Body = 0,
+    Title = 1,
+}
+
+/// Loads a .bcfnt font from memory into a slot. Returns false if it could not load.
+pub fn load_font_from(font: Font, data: &[u8]) -> bool {
+    // SAFETY: citro2d is running, and it copies the data before returning.
+    unsafe { c2d::shim_font_load_mem(font as i32, data.as_ptr().cast(), data.len()) }
+}
+
+/// Draws text in the body font.
 pub fn text(content: &str, x: f32, y: f32, scale: f32, color: u32, align: i32) {
+    text_in(Font::Body, content, x, y, scale, color, align);
+}
+
+/// The width `text_in` would draw the text at.
+pub fn text_width(font: Font, content: &str, scale: f32) -> f32 {
+    let Ok(content) = CString::new(content) else { return 0.0 };
+    // SAFETY: Only called inside `frame`, and the pointer is live for the call.
+    unsafe { c2d::shim_text_width(content.as_ptr(), scale, font as i32) }
+}
+
+/// The height of one line of text at a scale.
+pub fn line_height(scale: f32) -> f32 {
+    // SAFETY: citro2d is running.
+    unsafe { c2d::shim_line_height(scale) }
+}
+
+/// Draws text, made smaller if needed so it is no wider than `max_width`.
+pub fn text_fit(font: Font, content: &str, x: f32, y: f32, scale: f32, max_width: f32, color: u32, align: i32) {
+    let width = text_width(font, content, scale);
+    let scale = if width > max_width && width > 0.0 { scale * max_width / width } else { scale };
+    text_in(font, content, x, y, scale, color, align);
+}
+
+/// Splits text into lines no wider than `max_width`, at spaces. Line breaks already in the text stay.
+pub fn wrap(font: Font, lines: &[String], scale: f32, max_width: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    for source in lines {
+        let mut line = String::new();
+        for word in source.split_whitespace() {
+            let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+            if !line.is_empty() && text_width(font, &candidate, scale) > max_width {
+                out.push(std::mem::replace(&mut line, word.to_owned()));
+            } else {
+                line = candidate;
+            }
+        }
+        // Keeps blank lines and indented lines as they were.
+        if source.starts_with(' ') && !line.is_empty() {
+            line = format!("{}{line}", &source[..source.len() - source.trim_start().len()]);
+        }
+        out.push(line);
+    }
+    out
+}
+
+pub fn text_in(font: Font, content: &str, x: f32, y: f32, scale: f32, color: u32, align: i32) {
     let Ok(content) = CString::new(content) else { return };
     // SAFETY: Only called inside `frame`, and the pointer is live for the call.
-    unsafe { c2d::shim_text_aligned(content.as_ptr(), x, y, scale, color, align) };
+    unsafe { c2d::shim_text_aligned(content.as_ptr(), x, y, scale, color, align, font as i32) };
+}
+
+/// Draws a loaded image. `image` comes from `load_image` and is never freed.
+pub fn image(image: *mut core::ffi::c_void, x: f32, y: f32, size: f32) {
+    // SAFETY: Only called inside `frame`, and loaded images live until the app exits.
+    unsafe { c2d::shim_image_draw(image, x, y, size) };
+}
+
+/// Draws a loaded image scaled to fit a `size` square, centered in it, turned `extra_turns`
+/// quarter turns counterclockwise.
+pub fn icon(image: *mut core::ffi::c_void, x: f32, y: f32, size: f32, extra_turns: u8) {
+    // SAFETY: Only called inside `frame`, and loaded images live until the app exits.
+    unsafe { c2d::shim_image_draw_centered(image, x, y, size, extra_turns.into()) };
+}
+
+/// Makes a texture from a game image. Returns null if the GPU memory is full.
+pub fn load_image(flim: &ui_core::flim::Flim) -> *mut core::ffi::c_void {
+    let (texture_width, texture_height) = (i32::from(flim.texture_width), i32::from(flim.texture_height));
+    // SAFETY: `parse` checked that `pixels` fills the texture, and the shim copies it.
+    unsafe {
+        c2d::shim_image_load_game(
+            flim.gpu_format.into(),
+            texture_width,
+            texture_height,
+            flim.width.into(),
+            flim.height.into(),
+            flim.transposed,
+            flim.pixels.as_ptr(),
+            flim.pixels.len(),
+        )
+    }
+}
+
+/// Makes a texture from a decoded picture. Returns null if the GPU memory is full.
+pub fn load_picture(picture: &ui_core::picture::Texture) -> *mut core::ffi::c_void {
+    let (texture_width, texture_height) = (i32::from(picture.texture_width), i32::from(picture.texture_height));
+    // SAFETY: `decode` made `pixels` fill the texture, and the shim copies it.
+    unsafe { c2d::shim_image_load_rgba8(texture_width, texture_height, picture.width.into(), picture.height.into(), picture.pixels.as_ptr()) }
 }
 
 pub fn rect(x: f32, y: f32, w: f32, h: f32, color: u32) {
