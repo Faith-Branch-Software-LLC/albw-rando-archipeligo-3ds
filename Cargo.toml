@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/app-3ds", "crates/citro2d-sys", "crates/spike-3ds", "crates/fill-bench", "crates/block-pool", "crates/ui-core"]
+members = ["crates/app-3ds", "crates/citro2d-sys", "crates/spike-3ds", "crates/fill-bench", "crates/block-pool", "crates/ui-core", "crates/prefill-check", "crates/ap-patch"]
 exclude = ["vendor"]
 
 [workspace.dependencies]

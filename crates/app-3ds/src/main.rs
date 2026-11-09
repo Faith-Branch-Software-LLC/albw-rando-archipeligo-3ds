@@ -4,20 +4,25 @@
 //! main thread sleeps between frames, so the kernel lets it interrupt the work on time. A New 3DS
 //! gives the worker its own CPU core.
 
+#![feature(allocator_api)]
+
 mod art;
 mod draw;
 mod icons;
 mod job;
 mod memory;
 mod menu_screen;
+mod model_view;
 mod progress;
+mod share;
+mod voice;
 
 use std::fs;
 use std::path::Path;
 
 use ctru::applets::swkbd::{Button, ButtonConfig, Kind as KeyboardKind, SoftwareKeyboard};
 use ctru::prelude::*;
-use ui_core::menu::{Action, ModKind, Buttons, Input, Menu};
+use ui_core::menu::{Action, Buttons, Input, Menu, ModKind, Page};
 use ui_core::presets::{self, Preset};
 
 const MB: f32 = 1024.0 * 1024.0;
@@ -57,7 +62,8 @@ fn load_presets() -> (Vec<Preset>, Vec<String>) {
         let stem = path.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
         let parsed = fs::read_to_string(path).map_err(|err| err.to_string()).and_then(|text| presets::parse(&text, &stem));
         match parsed {
-            Ok((preset, skipped)) => {
+            Ok((mut preset, skipped)) => {
+                preset.file = path.file_name().map(|name| name.to_string_lossy().into_owned());
                 if !skipped.is_empty() {
                     notes.push(format!("{}: skipped {}.", preset.name, skipped.join(", ")));
                 }
@@ -79,6 +85,8 @@ fn read_input(hid: &Hid) -> Input {
         b: keys.contains(KeyPad::B),
         l: keys.contains(KeyPad::L),
         r: keys.contains(KeyPad::R),
+        x: keys.contains(KeyPad::X),
+        y: keys.contains(KeyPad::Y),
         start: keys.contains(KeyPad::START),
     };
     let touch = hid.keys_held().contains(KeyPad::TOUCH).then(|| {
@@ -102,6 +110,30 @@ fn edit_seed(menu: &mut Menu, seed_was_typed: &mut bool, apt: &Apt, gfx: &Gfx) {
     }
 }
 
+fn search_spoiler(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
+    let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
+    keyboard.set_hint_text(Some("Item or place, such as bow or eastern"));
+    keyboard.set_initial_text(Some(menu.search().to_owned().into()));
+    if let Ok((query, Button::Right)) = keyboard.launch(apt, gfx) {
+        menu.set_search(&query);
+    }
+}
+
+/// Where the Archipelago player name is kept between runs.
+const PLAYER_NAME: &str = "sdmc:/3ds/albw-rando/player-name.txt";
+
+fn edit_player_name(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
+    let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
+    keyboard.set_hint_text(Some("Your name in the multiworld, up to 16 letters"));
+    keyboard.set_initial_text(Some(menu.player_name.clone().into()));
+    if let Ok((name, Button::Right)) = keyboard.launch(apt, gfx) {
+        menu.set_player_name(&name);
+        if let Err(err) = fs::write(PLAYER_NAME, &menu.player_name) {
+            job::log(&format!("Player name not saved: {err}"));
+        }
+    }
+}
+
 fn save_preset(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
     let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
     keyboard.set_hint_text(Some("Preset name"));
@@ -113,15 +145,38 @@ fn save_preset(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
         menu.show_message("Name Not Usable", "Use at least one letter or number.");
         return;
     };
-    let path = format!("{}/{file_name}", job::PRESET_DIR);
-    if Path::new(&path).exists() {
-        menu.show_message("Name Already Used", "Pick another name, or delete that file from the presets folder.");
-        return;
+    match menu.preset_in_the_way(&name, &file_name) {
+        Some(preset) if preset.built_in => {
+            let text = format!("\"{}\" is built into the app and cannot be replaced. Pick another name.", preset.name);
+            menu.show_message("Name Already Used", &text);
+        }
+        Some(preset) => {
+            let existing = preset.name.clone();
+            menu.ask_to_replace(&name, &existing);
+        }
+        // A file the app could not read still holds the name.
+        None if Path::new(&format!("{}/{file_name}", job::PRESET_DIR)).exists() => {
+            menu.ask_to_replace(&name, &file_name);
+        }
+        None => write_preset(menu, &name),
     }
-    let written = fs::create_dir_all(job::PRESET_DIR).and_then(|()| fs::write(&path, presets::to_file_text(&name, &menu.rules)));
+}
+
+/// Saves the rules as a preset, replacing any preset that has the same name or file.
+fn write_preset(menu: &mut Menu, name: &str) {
+    let Some(file_name) = presets::file_name(name) else {
+        return;
+    };
+    let old_file = menu.preset_in_the_way(name, &file_name).filter(|preset| !preset.built_in).and_then(|preset| preset.file.clone());
+    let path = format!("{}/{file_name}", job::PRESET_DIR);
+    let written = fs::create_dir_all(job::PRESET_DIR).and_then(|()| fs::write(&path, presets::to_file_text(name, &menu.rules)));
     match written {
         Ok(()) => {
-            menu.preset_name = name;
+            // The old preset may sit in a file with another name, which would list it twice.
+            if let Some(old_file) = old_file.filter(|old| *old != file_name) {
+                let _ = fs::remove_file(format!("{}/{old_file}", job::PRESET_DIR));
+            }
+            menu.preset_name = name.to_owned();
             menu.set_presets(load_presets().0);
             menu.show_message("Preset Saved", &format!("Saved as /3ds/albw-rando/presets/{file_name}. Copy that file to share it."));
         }
@@ -166,6 +221,7 @@ fn main() {
     memory::start_pool(if new_memory { heap } else { heap.min(OLD_3DS_HEAP) }, reserve * 1024 * 1024);
 
     draw::start();
+    let previews_work = model_view::start();
 
     // The first launch reads the icons from the game, which takes a moment.
     draw::frame(
@@ -185,15 +241,26 @@ fn main() {
 
     let (preset_list, notes) = load_presets();
     let mut menu = Menu::new(random_seed(), preset_list, !new_memory);
+    let mut voices = voice::Voices::new();
     menu.set_mods(job::list_mods(job::MODEL_DIR), job::list_mods(job::VOICE_DIR));
     menu.game_location = game_location;
     menu.display = display;
+    if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
+        menu.set_player_name(&name);
+    }
+    // The albw.local page, while the sharing page shows, and what it serves.
+    let mut sharing: Option<(share::Share, share::Content, Vec<String>)> = None;
     if !notes.is_empty() {
         menu.show_message("Preset Notes", &notes.join(" "));
     }
     let mut seed_was_typed = false;
     let mut working: Option<progress::Screen> = None;
     let mut vblanks = 0u32;
+    // The model preview on the Models and Voices page: which mod it shows, and the loaded model.
+    let mut preview: Option<(Option<String>, Option<model_view::Preview>)> = None;
+    // Previews being replaced wait two frames before being freed, as the GPU may still read them.
+    let mut retired: Vec<(u32, model_view::Preview)> = Vec::new();
+    let mut frames = 0u32;
     let mut autostart = Path::new(job::AUTOSTART).exists();
     // For testing: the file's lines name a model, a voice, a seed number, and a preset.
     if let Ok(text) = fs::read_to_string(job::AUTOSTART) {
@@ -208,9 +275,27 @@ fn main() {
         }
     }
 
-    // For testing: opens a page of rules, to check how it looks.
-    if let Some(category) = fs::read_to_string(job::TEST_PAGE).ok().and_then(|text| text.trim().parse().ok()) {
-        menu.open_category(category);
+    // For testing: opens a page of rules by number, or "mods" and an optional model name opens the
+    // Models and Voices page, and "replace" and a name asks to replace that preset, to check how
+    // they look. After "mods", a third line names a voice to play once, or "game" for the original.
+    // The result goes to the run log.
+    if let Ok(text) = fs::read_to_string(job::TEST_PAGE) {
+        let mut lines = text.lines();
+        let first = lines.next().unwrap_or("").trim();
+        if first == "mods" {
+            menu.select_mod(ModKind::Model, lines.next().unwrap_or("").trim());
+            menu.open_mods();
+            if let Some(voice) = lines.next().map(str::trim).filter(|line| !line.is_empty()) {
+                menu.select_mod(ModKind::Voice, voice);
+                let result = voices.play(menu.voice());
+                job::log(&format!("Test voice {voice}: {result:?}"));
+            }
+        } else if first == "replace" {
+            let name = lines.next().unwrap_or("My Rules").trim();
+            menu.ask_to_replace(name, name);
+        } else if let Ok(category) = first.parse() {
+            menu.open_category(category);
+        }
     }
 
     'app: while apt.main_loop() {
@@ -240,6 +325,25 @@ fn main() {
             continue;
         }
 
+        if let Some((server, content, received)) = sharing.as_mut() {
+            if menu.page() == Page::Sharing {
+                for event in server.poll(content) {
+                    match event {
+                        share::Event::Saved(name) => received.push(format!("Received {name}")),
+                    }
+                }
+                let mut lines = server.address_lines();
+                lines.extend(received.iter().rev().take(3).cloned());
+                if !received.is_empty() {
+                    lines.push("Press B, then open Patch Files to apply it.".to_owned());
+                }
+                menu.set_share_status(lines);
+            } else {
+                job::log("Sharing stopped");
+                sharing = None;
+            }
+        }
+
         let action = if autostart { Action::Generate } else { menu.update(read_input(&hid)) };
         autostart = false;
         match action {
@@ -251,6 +355,58 @@ fn main() {
                 seed_was_typed = false;
             }
             Action::SavePreset => save_preset(&mut menu, &apt, &gfx),
+            Action::ReplacePreset(name) => write_preset(&mut menu, &name),
+            Action::ListSpoilers => menu.show_spoiler_files(job::list_spoilers()),
+            Action::OpenSpoiler(name) => match job::read_spoiler(&name) {
+                Ok(spoiler) => menu.show_spoiler(spoiler),
+                Err(text) => menu.show_message("Can't Open the Log", &text),
+            },
+            Action::SearchSpoiler => search_spoiler(&mut menu, &apt, &gfx),
+            Action::PlayVoice => {
+                if let Err(text) = voices.play(menu.voice()) {
+                    menu.show_message("Can't Play the Voice", &text);
+                }
+            }
+            Action::ListPatches => menu.show_patches(job::list_patches()),
+            Action::EditPlayerName => edit_player_name(&mut menu, &apt, &gfx),
+            Action::StartSharing => match share::Share::start() {
+                Ok(server) => {
+                    let content = share::Content { player: menu.player_name.clone(), options_file: menu.options_file() };
+                    let mut lines = server.address_lines();
+                    lines.push(format!("Options for {} are ready to download.", menu.player_name));
+                    menu.show_sharing(lines);
+                    sharing = Some((server, content, Vec::new()));
+                }
+                Err(text) => menu.show_message("Can't Share", &text),
+            },
+            Action::OpenPatch(name) => match job::read_patch(&name) {
+                Ok(summary) => menu.show_patch(summary),
+                Err(text) => menu.show_message("Can't Use This Patch", &text),
+            },
+            Action::PatchArchipelago(file) => {
+                let looks = ap_patch::Looks {
+                    night_mode: menu.look(ui_core::menu::Look::NightMode),
+                    change_freestanding_models: menu.look(ui_core::menu::Look::FreestandingModels),
+                };
+                job::set_request(job::Request {
+                    seed: 0,
+                    seed_was_typed: false,
+                    settings: Default::default(),
+                    preset_name: String::new(),
+                    new_memory,
+                    model: menu.model().map(str::to_owned),
+                    voice: menu.voice().map(str::to_owned),
+                    archipelago: Some((file, looks)),
+                });
+                progress::reset();
+                randomizer::progress::set_hook(job::on_progress);
+                working = Some(progress::Screen::new(is_new, heap as f32 / MB));
+                if !start_worker(is_new, priority) {
+                    progress::fail("Could not start the worker thread.");
+                    progress::finish();
+                }
+                continue;
+            }
             Action::Generate => {
                 job::set_request(job::Request {
                     seed: menu.seed,
@@ -260,6 +416,7 @@ fn main() {
                     new_memory,
                     model: menu.model().map(str::to_owned),
                     voice: menu.voice().map(str::to_owned),
+                    archipelago: None,
                 });
                 progress::reset();
                 randomizer::progress::set_hook(job::on_progress);
@@ -276,7 +433,27 @@ fn main() {
             display = menu.display;
             let _ = fs::write(art::DISPLAY, display.save());
         }
-        menu_screen::draw(&menu.view(), &loaded_icons, top_art, display);
+        frames = frames.wrapping_add(1);
+        retired.retain(|(frame, _)| frames.wrapping_sub(*frame) < 2);
+        if previews_work && menu.page() == Page::Mods {
+            let wanted = menu.model().map(str::to_owned);
+            if preview.as_ref().map(|(shown, _)| shown) != Some(&wanted) {
+                let loaded = match model_view::Preview::load(wanted.as_deref()) {
+                    Ok(model) => Some(model),
+                    Err(err) => {
+                        job::log(&format!("Model preview for {}: {err}", wanted.as_deref().unwrap_or("the game")));
+                        None
+                    }
+                };
+                if let Some((_, Some(old))) = preview.replace((wanted, loaded)) {
+                    retired.push((frames, old));
+                }
+            }
+        } else if let Some((_, Some(old))) = preview.take() {
+            retired.push((frames, old));
+        }
+        let shown = preview.as_ref().and_then(|(_, model)| model.as_ref()).map(|model| (model, frames as f32 * 0.02));
+        menu_screen::draw(&menu.view(), &loaded_icons, top_art, display, shown);
     }
     draw::stop();
 }

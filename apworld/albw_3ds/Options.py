@@ -1,0 +1,465 @@
+from dataclasses import dataclass
+from typing import Dict, get_type_hints
+from Options import PerGameCommonOptions, Choice, Range, Toggle, DeathLink, StartInventoryPool
+import albw3dsrandomizer as albwrandomizer
+
+class LogicMode(Choice):
+    """Logic to use for item placement.
+    normal: Standard gameplay, no tricky item use or glitches. If unsure, choose this.
+    hard: Adds tricks that aren't technically glitches. Lamp + Net considered as weapons. No glitches.
+    glitched: Includes the above plus a selection of easy-to-learn glitches.
+    adv_glitched: Includes the above plus "advanced" glitches that may be a challenge to master.
+    hell: Includes every known RTA-viable glitch. Don't choose this."""
+    display_name = "Logic Mode"
+    option_normal = 0
+    option_hard = 1
+    option_glitched = 2
+    option_adv_glitched = 3
+    option_hell = 4
+    default = 0
+
+class RandomizeDungeonPrizes(Toggle):
+    """This shuffles all Sage Portraits and Pendants among themselves."""
+    display_name = "Randomize Dungeon Prizes"
+
+class ProgressionBosses(Toggle):
+    """Place progression items on all dungeon bosses."""
+    display_name = "Progression Bosses"
+
+class LoruleCastleRequirement(Range):
+    """Choose how many Portraits are needed to enter Lorule Castle and fight Yuganon."""
+    display_name = "Lorule Castle Requirement"
+    range_start = 0
+    range_end = 7
+    default = 7
+
+class PedestalRequirement(Choice):
+    """Choose which Pendants are required to reach the Master Sword Pedestal.
+    vanilla: Only the Pendants of Power and Wisdom are required.
+    standard: All Pendants are required."""
+    display_name = "Pedestal Requirement"
+    option_vanilla = 0
+    option_standard = 1
+    default = 1
+
+class NiceItems(Choice):
+    """Choose how to handle Nice Items.
+    vanilla: Nice Items are obtained as upgrades from Mother Maiamai.
+    shuffled: Freely shuffles two progressive copies of each Ravio Item.
+    off: Removes Nice Items from the game.
+    upgrades: Shuffles upgrades for each Ravio item, which upgrade your item once you get it."""
+    display_name = "Nice Items"
+    option_vanilla = 0
+    option_shuffled = 1
+    option_off = 2
+    option_upgrades = 3
+    default = 0
+
+class SuperItems(Choice):
+    """Choose how to handle Super Items.
+    shuffled: Shuffles a second progressive copy of the Lamp and Net into the general item pool.
+    off: Removes Super Items from the game.
+    upgrades: Shuffles upgrades for the Lamp and Net, which upgrade your item once you get it."""
+    display_name = "Super Items"
+    option_shuffled = 0
+    option_off = 1
+    option_upgrades = 2
+    default = 1
+
+class ShuffleMaiamaiRewards(Toggle):
+    """Choose whether to put items on Mother Maiamai. Has no effect if `nice_items` is set to vanilla.
+    Instead of trading Maiamai for items, Mother Maiamai gives you an item once you have the
+    required Ravio item and a certain number of Maiamai, controlled by `maiamai_limit`."""
+    display_name = "Shuffle Maiamai Rewards"
+
+class MaiamaiLimit(Range):
+    """When Mother Maiamai rewards are shuffled, this controls the maximum number of Maiamai
+    that can be required to get items from Mother Maiamai."""
+    display_name = "Maiamai Limit"
+    range_start = 0
+    range_end = 100
+    default = 50
+
+class SmallKeys(Choice):
+    """Choose how to randomize small keys.
+    own_dungeons: Small keys are found in their own dungeons.
+    anywhere: (Keyos) Small keys can be found in any world.
+    remove: (Keysy) Small keys and the doors they lock are removed from the game."""
+    display_name = "Small Keys"
+    option_own_dungeons = 0
+    option_anywhere = 1
+    alias_keyos = 1
+    option_remove = 2
+    alias_keysy = 2
+
+class BigKeys(Choice):
+    """Choose how to randomize big keys.
+    own_dungeons: Big keys are found in their own dungeons.
+    anywhere: (Keyos) Big keys can be found in any world.
+    remove: (Keysy) Big keys and the doors they lock are removed from the game."""
+    display_name = "Big Keys"
+    option_own_dungeons = 0
+    option_anywhere = 1
+    alias_keyos = 1
+    option_remove = 2
+    alias_keysy = 2
+
+class Compasses(Choice):
+    """Choose how to randomize compasses.
+    own_dungeons: Compasses are found in their own dungeons.
+    anywhere: Compasses can be found in any world.
+    startwith: Start with the compass to every dungeon."""
+    display_name = "Compasses"
+    option_own_dungeons = 0
+    option_anywhere = 1
+    option_startwith = 2
+
+class KeyRings(Toggle):
+    """Replace all the small keys for a dungeon with a single Key Ring for that dungeon that opens all the locked doors."""
+    """These are placed either in their own dungeons or anywhere in the multiworld, depending on the small_keys setting."""
+    display_name = "Key Rings"
+
+class LampAndNetAsWeapons(Toggle):
+    """Treat the base Lamp and Net as damage-dealing weapons?
+    - The red base Lamp and Net each deal 1/2 the damage of the Forgotten Sword (i.e. they're VERY BAD weapons).
+    - The blue Super Lamp and Super Net each deal 4 damage (same as MS Lv3) and are always considered weapons, regardless of this setting."""
+    display_name = "Lamp and Net as Weapons"
+
+class NoProgressionEnemies(Toggle):
+    """Removes Enemies from dungeons that are themselves Progression (e.g.: Bawbs, the bomb enemy).
+    Logic will be adjusted to require the player's items instead."""
+    display_name = "No Progression Enemies"
+
+class AssuredWeapon(Toggle):
+    """If enabled at least one weapon is guaranteed to be placed in Ravio's Shop."""
+    display_name = "Assured Weapon"
+
+class MaiamaiMayhem(Toggle):
+    """This shuffles Maiamai into the pool, adding 100 more locations."""
+    display_name = "Maiamai Mayhem"
+
+class InitialCrackState(Choice):
+    """Choose the initial Crack state:
+    closed: All Cracks except the Hyrule Castle Crack (and its pair) remain closed until the Quake Item is found.
+    open: All Cracks are open from the start of the game, and the Quake Item is not in the item pool.
+    progressive: All Cracks except the Hyrule Castle Crack are closed, but the Quake Item and the Bracelets are not in the item pool.
+      Instead, there are two Progressive Merge items. The first one you get allows you to merge, while the second one opens the cracks."""
+    display_name = "Initial Crack State"
+    option_closed = 0
+    option_open = 1
+    option_progressive = 2
+    default = 1
+
+class CrackShuffle(Choice):
+    """Choose how to shuffle Cracks:
+    off: Cracks are not shuffled.
+    cross_world_pairs: Cracks are shuffled, but remain in Hyrule/Lorule pairs.
+    any_world_pairs: Cracks are shuffled freely, and can lead to the same or opposite world.
+    mirrored_cross_world_pairs: Same as Cross World Pairs, but each pair's vanilla counterparts will be in a matching pair.
+    mirrored_any_world_pairs: Same as Any World Pairs, but each pair's vanilla counterparts will be in a matching pair."""
+    display_name = "Crack Shuffle"
+    option_off = 0
+    option_cross_world_pairs = 1
+    option_any_world_pairs = 2
+    option_mirrored_cross_world_pairs = 3
+    option_mirrored_any_world_pairs = 4
+    default = 0
+
+class MinigamesExcluded(Toggle):
+    """Excludes the following: Octoball Derby, Dodge the Cuccos, Hyrule Hotfoot, Treacherous Tower, and both Rupee Rushes."""
+    display_name = "Minigames Excluded"
+
+class SkipBigBombFlower(Toggle):
+    """Skips the Big Bomb Flower by removing the 5 Big Rocks in Lorule Field.
+    (Does not affect Lorule Castle Bomb Trial)"""
+    display_name = "Skip Big Bomb Flower"
+
+class TrialsRequired(Range):
+    """Choose the number of (randomly selected) trials required to open the Lorule Castle Trials Door."""
+    display_name = "Trials Required"
+    range_start = 0
+    range_end = 4
+    default = 4
+
+class OpenTrialsDoor(Toggle):
+    """Makes the Lorule Castle Trials Door automatically open from both sides.
+    This may require entering Lorule Castle early via the crack.
+    If turned on, this overrides the Trials Required setting."""
+    display_name = "Open Trials Door"
+
+class BowOfLightInCastle(Toggle):
+    """Limits the Bow of Light's placement to somewhere in Lorule Castle (including possibly Zelda)."""
+    display_name = "Bow of Light in Castle"
+
+class WeatherVanes(Choice):
+    """Choose Weather Vanes behavior. Logic may require using them to progress.
+    standard: Start with only the standard complimentary Weather Vanes (Link's House & Vacant House)
+    shuffled: Weather Vane destinations are shuffled into random pairs
+    convenient: Start with convenient Weather Vanes that don't affect logic
+    hyrule: Start with the 9 Hyrule Weather Vanes (and Vacant House)
+    lorule: Start with the 13 Lorule Weather Vanes (and Link's House)
+    all: Start with all 22 Weather Vanes"""
+    display_name = "Weather Vanes"
+    option_standard = 0
+    option_shuffled = 1
+    option_convenient = 2
+    option_hyrule = 3
+    option_lorule = 4
+    option_all = 5
+    default = 0
+
+class DarkRoomsLampless(Toggle):
+    """If enabled the logic may expect players to cross Dark Rooms without the Lamp.
+    Not for beginners and those who like being able to see things."""
+    display_name = "Dark Rooms Lampless"
+
+class SwordlessMode(Toggle):
+    """Removes *ALL* Swords from the game.
+    The Bug Net becomes a required item to play Dead Man's Volley against Yuga Ganon."""
+    display_name = "Swordless Mode"
+
+class HintGhosts(Choice):
+    """Choose the behavior of the Hint Ghosts. (Hint Ghosts in dungeons never appear.)
+    off: Hint Ghosts do not appear.
+    always: Hint Ghosts always appear.
+    glasses: Hint Ghosts appear once you obtain the Hint Glasses item."""
+    display_name = "Hint Ghosts"
+    option_off = 0
+    option_always = 1
+    option_glasses = 2
+    default = 1
+
+class ChestSizeMatchesContents(Toggle):
+    """All chests containing progression items will become large, and others will be made small.
+    Note: Some large chests will have a reduced hitbox to prevent negative gameplay interference."""
+    display_name = "Chest Size Matches Contents"
+
+class TreacherousTowerFloors(Range):
+    """Choose how many floors the Treacherous Tower should have (2-66)."""
+    display_name = "Treacherous Tower Floors"
+    range_start = 2
+    range_end = 66
+    default = 5
+
+class PurplePotionBottles(Toggle):
+    """Fills all Empty Bottles with a free Purple Potion."""
+    display_name = "Purple Potion Bottles"
+
+class StartWithMerge(Toggle):
+    """Start with the ability to merge into walls. Ravio's Bracelet is removed from the item pool.
+    3DS edition option."""
+    display_name = "Start with Merge"
+
+class StartWithPouch(Toggle):
+    """Start with the Pouch, so you can carry Ravio's items from the start.
+    3DS edition option."""
+    display_name = "Start with Pouch"
+
+class BellInShop(Toggle):
+    """Place the Bell in one of Ravio's shop slots.
+    3DS edition option."""
+    display_name = "Bell in Shop"
+
+class SwordInShop(Toggle):
+    """Place the first Progressive Sword in one of Ravio's shop slots. Not compatible with Swordless
+    Mode, and turns off Assured Weapon. 3DS edition option."""
+    display_name = "Sword in Shop"
+
+class BootsInShop(Toggle):
+    """Place the Pegasus Boots in one of Ravio's shop slots. Turns off Assured Weapon.
+    3DS edition option."""
+    display_name = "Boots in Shop"
+
+class NightMode(Toggle):
+    """Darkens the world as if it were night. Looks only, with no effect on logic.
+    3DS edition option, and the 3DS app can change it when patching."""
+    display_name = "Night Mode"
+
+class ChangeFreestandingModels(Toggle):
+    """Freestanding items show the model of the item they hold. Looks only, with no effect on logic.
+    3DS edition option, and the 3DS app can change it when patching."""
+    display_name = "Change Freestanding Models"
+
+# class BeeTrapPercentage(Range):
+#     """Choose the percentage of junk items (green, blue, and red rupees, and monster parts)
+#     to be replaced by bee traps."""
+#     display_name = "Bee Trap Percentage"
+#     range_start = 0
+#     range_end = 100
+#     default = 0
+
+@dataclass
+class ALBWOptions(PerGameCommonOptions):
+    death_link: DeathLink
+    logic_mode: LogicMode
+    randomize_dungeon_prizes: RandomizeDungeonPrizes
+    progression_bosses: ProgressionBosses
+    lorule_castle_requirement: LoruleCastleRequirement
+    pedestal_requirement: PedestalRequirement
+    nice_items: NiceItems
+    super_items: SuperItems
+    shuffle_maiamai_rewards: ShuffleMaiamaiRewards
+    maiamai_limit: MaiamaiLimit
+    small_keys: SmallKeys
+    big_keys: BigKeys
+    compasses: Compasses
+    key_rings: KeyRings
+    lamp_and_net_as_weapons: LampAndNetAsWeapons
+    no_progression_enemies: NoProgressionEnemies
+    assured_weapon: AssuredWeapon
+    maiamai_mayhem: MaiamaiMayhem
+    initial_crack_state: InitialCrackState
+    crack_shuffle: CrackShuffle
+    minigames_excluded: MinigamesExcluded
+    skip_big_bomb_flower: SkipBigBombFlower
+    trials_required: TrialsRequired
+    open_trials_door: OpenTrialsDoor
+    bow_of_light_in_castle: BowOfLightInCastle
+    weather_vanes: WeatherVanes
+    dark_rooms_lampless: DarkRoomsLampless
+    swordless_mode: SwordlessMode
+    hint_ghosts: HintGhosts
+    chest_size_matches_contents: ChestSizeMatchesContents
+    treacherous_tower_floors: TreacherousTowerFloors
+    purple_potion_bottles: PurplePotionBottles
+    start_with_merge: StartWithMerge
+    start_with_pouch: StartWithPouch
+    bell_in_shop: BellInShop
+    sword_in_shop: SwordInShop
+    boots_in_shop: BootsInShop
+    night_mode: NightMode
+    change_freestanding_models: ChangeFreestandingModels
+    # bee_trap_percentage: BeeTrapPercentage
+    start_inventory_from_pool: StartInventoryPool
+
+    @classmethod
+    def option_names(cls):
+        return [option for option in get_type_hints(cls) if option not in get_type_hints(PerGameCommonOptions)]
+
+def create_randomizer_settings(options: ALBWOptions) -> albwrandomizer.Settings:
+    settings = albwrandomizer.Settings()
+
+    settings.dev_mode = False
+    settings.lc_requirement = options.lorule_castle_requirement.value
+    settings.yuganon_requirement = options.lorule_castle_requirement.value
+    settings.dark_rooms_lampless = bool(options.dark_rooms_lampless.value)
+    settings.dungeon_prize_shuffle = bool(options.randomize_dungeon_prizes.value)
+    settings.shuffle_maiamai_rewards = bool(options.shuffle_maiamai_rewards.value)
+    settings.maiamai_limit = options.maiamai_limit.value
+    settings.maiamai_madness = bool(options.maiamai_mayhem.value)
+    settings.lamp_and_net_as_weapons = bool(options.lamp_and_net_as_weapons.value)
+    settings.ravios_shop = albwrandomizer.RaviosShop.Open
+    settings.bow_of_light_in_castle = bool(options.bow_of_light_in_castle.value)
+    settings.no_progression_enemies = bool(options.no_progression_enemies.value)
+    settings.progressive_bow_of_light = False
+    settings.swordless_mode = bool(options.swordless_mode.value)
+    settings.start_with_merge = bool(options.start_with_merge.value)
+    settings.start_with_pouch = bool(options.start_with_pouch.value)
+    settings.bell_in_shop = bool(options.bell_in_shop.value)
+    settings.sword_in_shop = bool(options.sword_in_shop.value)
+    settings.boots_in_shop = bool(options.boots_in_shop.value)
+    settings.assured_weapon = bool(options.assured_weapon.value)
+    settings.chest_size_matches_contents = bool(options.chest_size_matches_contents.value)
+    settings.change_freestanding_models = bool(options.change_freestanding_models.value)
+    settings.minigames_excluded = bool(options.minigames_excluded.value)
+    settings.skip_big_bomb_flower = bool(options.skip_big_bomb_flower.value)
+    settings.treacherous_tower_floors = options.treacherous_tower_floors.value
+    settings.purple_potion_bottles = bool(options.purple_potion_bottles.value)
+    settings.start_with_compasses = options.compasses.value == Compasses.option_startwith
+    settings.night_mode = bool(options.night_mode.value)
+    settings.user_exclusions = set()
+
+    if options.logic_mode.value == LogicMode.option_normal:
+        settings.logic_mode = albwrandomizer.LogicMode.Normal
+    elif options.logic_mode.value == LogicMode.option_hard:
+        settings.logic_mode = albwrandomizer.LogicMode.Hard
+    elif options.logic_mode.value == LogicMode.option_glitched:
+        settings.logic_mode = albwrandomizer.LogicMode.Glitched
+    elif options.logic_mode.value == LogicMode.option_adv_glitched:
+        settings.logic_mode = albwrandomizer.LogicMode.AdvGlitched
+    elif options.logic_mode.value == LogicMode.option_hell:
+        settings.logic_mode = albwrandomizer.LogicMode.Hell
+    
+    if options.pedestal_requirement == PedestalRequirement.option_vanilla:
+        settings.ped_requirement = albwrandomizer.PedestalSetting.Vanilla
+    elif options.pedestal_requirement == PedestalRequirement.option_standard:
+        settings.ped_requirement = albwrandomizer.PedestalSetting.Standard
+    
+    if options.nice_items == NiceItems.option_vanilla:
+        settings.nice_items = albwrandomizer.NiceItems.Vanilla
+    elif options.nice_items == NiceItems.option_shuffled:
+        settings.nice_items = albwrandomizer.NiceItems.Shuffled
+    elif options.nice_items == NiceItems.option_off:
+        settings.nice_items = albwrandomizer.NiceItems.Off
+    elif options.nice_items == NiceItems.option_upgrades:
+        settings.nice_items = albwrandomizer.NiceItems.Upgrades
+
+    if options.super_items == SuperItems.option_shuffled:
+        settings.super_items = albwrandomizer.SuperItems.Shuffled
+    elif options.super_items == SuperItems.option_off:
+        settings.super_items = albwrandomizer.SuperItems.Off
+    elif options.super_items == SuperItems.option_upgrades:
+        settings.super_items = albwrandomizer.SuperItems.Upgrades
+
+    if options.initial_crack_state == InitialCrackState.option_closed:
+        settings.cracks = albwrandomizer.Cracks.Closed
+    elif options.initial_crack_state == InitialCrackState.option_open:
+        settings.cracks = albwrandomizer.Cracks.Open
+    elif options.initial_crack_state == InitialCrackState.option_progressive:
+        settings.cracks = albwrandomizer.Cracks.Progressive
+    
+    if options.crack_shuffle == CrackShuffle.option_off:
+        settings.cracksanity = albwrandomizer.Cracksanity.Off
+    elif options.crack_shuffle == CrackShuffle.option_cross_world_pairs:
+        settings.cracksanity = albwrandomizer.Cracksanity.CrossWorldPairs
+    elif options.crack_shuffle == CrackShuffle.option_any_world_pairs:
+        settings.cracksanity = albwrandomizer.Cracksanity.AnyWorldPairs
+    elif options.crack_shuffle == CrackShuffle.option_mirrored_cross_world_pairs:
+        settings.cracksanity = albwrandomizer.Cracksanity.MirroredCrossWorldPairs
+    elif options.crack_shuffle == CrackShuffle.option_mirrored_any_world_pairs:
+        settings.cracksanity = albwrandomizer.Cracksanity.MirroredAnyWorldPairs
+    
+    if options.weather_vanes == WeatherVanes.option_standard:
+        settings.weather_vanes = albwrandomizer.WeatherVanes.Standard
+    elif options.weather_vanes == WeatherVanes.option_shuffled:
+        settings.weather_vanes = albwrandomizer.WeatherVanes.Shuffled
+    elif options.weather_vanes == WeatherVanes.option_convenient:
+        settings.weather_vanes = albwrandomizer.WeatherVanes.Convenient
+    elif options.weather_vanes == WeatherVanes.option_hyrule:
+        settings.weather_vanes = albwrandomizer.WeatherVanes.Hyrule
+    elif options.weather_vanes == WeatherVanes.option_lorule:
+        settings.weather_vanes = albwrandomizer.WeatherVanes.Lorule
+    elif options.weather_vanes == WeatherVanes.option_all:
+        settings.weather_vanes = albwrandomizer.WeatherVanes.All
+
+    if options.small_keys != SmallKeys.option_remove and options.big_keys != BigKeys.option_remove:
+        settings.keysy = albwrandomizer.Keysy.Off
+    elif options.small_keys == SmallKeys.option_remove and options.big_keys != BigKeys.option_remove:
+        settings.keysy = albwrandomizer.Keysy.SmallKeysy
+    elif options.small_keys != SmallKeys.option_remove and options.big_keys == BigKeys.option_remove:
+        settings.keysy = albwrandomizer.Keysy.BigKeysy
+    elif options.small_keys == SmallKeys.option_remove and options.big_keys == BigKeys.option_remove:
+        settings.keysy = albwrandomizer.Keysy.AllKeysy
+    
+    if options.trials_required == 0:
+        settings.trials_door = albwrandomizer.TrialsDoor.OpenFromInsideOnly
+    elif options.trials_required == 1:
+        settings.trials_door = albwrandomizer.TrialsDoor.OneTrialRequired
+    elif options.trials_required == 2:
+        settings.trials_door = albwrandomizer.TrialsDoor.TwoTrialsRequired
+    elif options.trials_required == 3:
+        settings.trials_door = albwrandomizer.TrialsDoor.ThreeTrialsRequired
+    elif options.trials_required == 4:
+        settings.trials_door = albwrandomizer.TrialsDoor.AllTrialsRequired
+
+    if options.open_trials_door:
+        settings.trials_door = albwrandomizer.TrialsDoor.OpenFromBothSides
+
+    if options.hint_ghosts == HintGhosts.option_off:
+        settings.hint_ghosts = albwrandomizer.HintGhosts.Off
+    elif options.hint_ghosts == HintGhosts.option_always:
+        settings.hint_ghosts = albwrandomizer.HintGhosts.Always
+    elif options.hint_ghosts == HintGhosts.option_glasses:
+        settings.hint_ghosts = albwrandomizer.HintGhosts.Glasses
+
+    return settings

@@ -5,10 +5,9 @@ use crate::filler::logic::Logic;
 use crate::filler::path::Path;
 use crate::world::{crack_left, crack_right, edge, location};
 use crate::CrackMap;
-use std::collections::HashMap;
 
-pub(crate) fn graph(crack_map: &CrackMap) -> HashMap<Location, LocationNode> {
-    HashMap::from([
+pub(crate) fn graph(crack_map: &CrackMap) -> crate::DashMap<Location, LocationNode> {
+    crate::DashMap::from_iter([
         (
             HyruleCastleDungeon,
             location(

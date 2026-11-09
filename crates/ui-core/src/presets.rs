@@ -15,6 +15,8 @@ pub struct Preset {
     pub overrides: Map<String, Value>,
     /// True for presets that ship inside the app, which cannot be replaced.
     pub built_in: bool,
+    /// The file name in the presets folder, for presets read from the SD card.
+    pub file: Option<String>,
 }
 
 const BUILT_IN: [(&str, &str, &str); 5] = [
@@ -54,6 +56,7 @@ pub fn built_in() -> Vec<Preset> {
             description: (*description).to_owned(),
             overrides: serde_json::from_str(values).expect("built-in presets are valid JSON"),
             built_in: true,
+            file: None,
         })
         .collect()
 }
@@ -139,7 +142,7 @@ pub fn parse(text: &str, fallback_name: &str) -> Result<(Preset, Vec<String>), S
             skipped.push(key);
         }
     }
-    Ok((Preset { name, description, overrides, built_in: false }, skipped))
+    Ok((Preset { name, description, overrides, built_in: false, file: None }, skipped))
 }
 
 /// The text to save for a preset file.

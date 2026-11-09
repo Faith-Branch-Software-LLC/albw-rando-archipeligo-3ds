@@ -8,11 +8,10 @@ use crate::regions;
 use crate::world::{check, edge, fast_travel_lorule, goal, location};
 use crate::LocationInfo;
 
-use std::collections::HashMap;
 
 /// Skull Woods World Graph
-pub(crate) fn graph() -> HashMap<Location, LocationNode> {
-    HashMap::from([
+pub(crate) fn graph() -> crate::DashMap<Location, LocationNode> {
+    crate::DashMap::from_iter([
         (
             SkullWoodsFoyer,
             location(

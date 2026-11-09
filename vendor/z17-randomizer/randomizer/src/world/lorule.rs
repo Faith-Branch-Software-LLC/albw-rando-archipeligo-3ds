@@ -14,11 +14,10 @@ use crate::world::{
 use crate::LocationInfo;
 use crate::{regions, CrackMap};
 use game::ghosts::HintGhost;
-use std::collections::HashMap;
 
 /// Lorule
-pub(crate) fn graph(crack_map: &CrackMap) -> HashMap<Location, LocationNode> {
-    HashMap::from([
+pub(crate) fn graph(crack_map: &CrackMap) -> crate::DashMap<Location, LocationNode> {
+    crate::DashMap::from_iter([
         (
             LoruleBellTravel,
             location(

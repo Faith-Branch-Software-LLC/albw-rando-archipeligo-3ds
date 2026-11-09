@@ -23,7 +23,7 @@ pub enum Setting {
 
 impl Default for Display {
     fn default() -> Self {
-        Self { text: 14, title: 26 }
+        Self { text: 16, title: 25 }
     }
 }
 

@@ -3,7 +3,6 @@
 use crate::Result;
 use crate::Text;
 use rand::prelude::StdRng;
-use rand::Rng;
 
 /// Text generation
 pub(crate) fn generate(rng: &mut StdRng) -> Result<Text> {
@@ -33,5 +32,5 @@ fn credits_text(rng: &mut StdRng) -> String {
         "COOL COOL COOL",
     ];
 
-    String::from(choices[rng.gen_range(0..choices.len())])
+    String::from(choices[crate::filler::util::index(rng, choices.len())])
 }

@@ -41,22 +41,30 @@ where
         P: Into<String>,
     {
         let path = path.into();
+        let (offset, length) = self.locate(&path)?;
+        Ok(File::new(path, read_slice_from_offset(&mut self.file, self.file_data + offset as u32, length as usize)?))
+    }
+
+    /// Reads up to `len` bytes from `start` within a file, without reading the rest of it.
+    pub fn read_range(&mut self, path: &str, start: u64, len: usize) -> Result<Box<[u8]>> {
+        let (offset, length) = self.locate(path)?;
+        let start = start.min(length);
+        let len = (len as u64).min(length - start) as usize;
+        Ok(read_slice_from_offset(&mut self.file, u64::from(self.file_data) + offset + start, len)?)
+    }
+
+    /// The offset and length of a file within the file data.
+    fn locate(&mut self, path: &str) -> Result<(u64, u64)> {
         if path.ends_with('/') {
             panic!("Attempt to open a directory.")
-        } else {
-            let (parent, file) = {
-                let path = path.strip_prefix('/').unwrap_or(&path);
-                let mut split = path.rsplitn(2, '/');
-                let file = split.next().expect("Attempt to read empty file name.");
-                (self.find_dir(split.next(), 0)?, file)
-            };
-            let (offset, length) =
-                self.find_file(parent, file)?.ok_or_else(|| Error::new(format!("File not found: '{}'.", path)))?;
-            Ok(File::new(
-                path,
-                read_slice_from_offset(&mut self.file, self.file_data + offset as u32, length as usize)?,
-            ))
         }
+        let (parent, file) = {
+            let path = path.strip_prefix('/').unwrap_or(path);
+            let mut split = path.rsplitn(2, '/');
+            let file = split.next().expect("Attempt to read empty file name.");
+            (self.find_dir(split.next(), 0)?, file)
+        };
+        self.find_file(parent, file)?.ok_or_else(|| Error::new(format!("File not found: '{}'.", path)))
     }
 
     fn find_dir(&mut self, name: Option<&str>, parent: u32) -> Result<u32> {

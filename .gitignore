@@ -7,3 +7,8 @@
 *.3ds
 *.cci
 .DS_Store
+# Mod files dropped here for testing. Mods belong to their authors.
+/romfs/
+# Modules from other systems, joined by the release workflow.
+/apworld/prebuilt/
+__pycache__/

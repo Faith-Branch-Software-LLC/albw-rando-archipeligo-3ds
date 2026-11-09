@@ -11,7 +11,7 @@ use modinfo::settings::logic::LogicMode;
 use modinfo::settings::nice_items::NiceItems;
 use path::Path;
 use queue::Queue;
-use rand::{rngs::StdRng, Rng};
+use rand::rngs::StdRng;
 use rom::Error;
 use std::collections::HashSet;
 
@@ -246,7 +246,7 @@ fn preplace_items(
 
     if !settings.progressive_bow_of_light && settings.bow_of_light_in_castle {
         check_map.insert(
-            String::from(bow_light_positions.remove(rng.gen_range(0..bow_light_positions.len()))),
+            String::from(bow_light_positions.remove(crate::filler::util::index(rng, bow_light_positions.len()))),
             Some(Item::BowOfLight.into()),
         );
         progression.retain(|x| *x != Item::BowOfLight);
@@ -292,7 +292,7 @@ fn preplace_items(
             weapons.push(Item::Net01);
         };
 
-        let weapon = *weapons.get(rng.gen_range(0..weapons.len())).unwrap();
+        let weapon = *weapons.get(crate::filler::util::index(rng, weapons.len())).unwrap();
         shop_items.push(weapon);
     }
 
@@ -323,7 +323,7 @@ fn insert_items_into_random_locations(
     items: Vec<Item>, mut locations: Vec<&str>, rng: &mut StdRng, check_map: &mut CheckMap, progression: &mut Vec<Item>,
 ) -> crate::Result<()> {
     for item in items {
-        check_map.insert(String::from(locations.remove(rng.gen_range(0..locations.len()))), Some(item.into()));
+        check_map.insert(String::from(locations.remove(crate::filler::util::index(rng, locations.len()))), Some(item.into()));
         progression.retain(|x| *x != item);
     }
 
@@ -377,7 +377,7 @@ fn handle_exclusions(rng: &mut StdRng, seed_info: &mut SeedInfo, check_map: &mut
                 continue;
             }
 
-            let index = rng.gen_range(0..junk.len());
+            let index = crate::filler::util::index(rng, junk.len());
             check_map.insert(check_name, Some(junk.remove(index).into()));
         } else {
             println!();
@@ -510,7 +510,7 @@ fn fill_junk(rng: &mut StdRng, check_map: &mut CheckMap, junk_items: &mut Pool) 
     }
 
     for junk in junk_items {
-        check_map.insert(empty_check_keys.remove(rng.gen_range(0..empty_check_keys.len())), Some((*junk).into()));
+        check_map.insert(empty_check_keys.remove(crate::filler::util::index(rng, empty_check_keys.len())), Some((*junk).into()));
     }
 
     Ok(())
@@ -847,7 +847,7 @@ fn assumed_fill(
 
 /// Places the given `item` on a random check in the `check_map`, then returns that check's name.
 fn place_item_randomly(item: Item, checks: &[Check], check_map: &mut CheckMap, rng: &mut StdRng) -> &'static str {
-    let check_name = checks.get(rng.gen_range(0..checks.len())).unwrap().get_name();
+    let check_name = checks.get(crate::filler::util::index(rng, checks.len())).unwrap().get_name();
     check_map.insert(check_name.to_owned(), Some(item.into()));
     check_name
 }

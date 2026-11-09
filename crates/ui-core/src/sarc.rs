@@ -1,4 +1,4 @@
-//! Finds one file by name in an uncompressed game archive (`.arc`).
+//! Finds one file by name in an uncompressed game archive (`.arc`, or a `.szs` after Yaz0).
 
 fn word(data: &[u8], at: usize) -> Option<usize> {
     Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize)
@@ -29,6 +29,27 @@ pub fn find<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
     None
 }
 
+/// Returns the contents of the file called `name` by its name hash, which works for archives that
+/// keep no name table, such as `ActorCommon.szs`.
+pub fn find_hashed<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
+    if data.get(..4)? != b"SARC" || data.get(6..8)? != [0xFF, 0xFE] {
+        return None;
+    }
+    let header = usize::from(u16::from_le_bytes(data.get(4..6)?.try_into().ok()?));
+    let data_start = word(data, 0x0C)?;
+    if data.get(header..header + 4)? != b"SFAT" {
+        return None;
+    }
+    let count = usize::from(u16::from_le_bytes(data.get(header + 6..header + 8)?.try_into().ok()?));
+    let multiplier = word(data, header + 8)? as u32;
+    let hash = name.chars().fold(0u32, |hash, ch| (ch as u32).wrapping_add(hash.wrapping_mul(multiplier)));
+    let nodes = header + 12;
+    (0..count).find_map(|index| {
+        let node = nodes + index * 16;
+        (word(data, node)? as u32 == hash).then(|| data.get(data_start + word(data, node + 8)?..data_start + word(data, node + 12)?))?
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +71,16 @@ mod tests {
         out.extend_from_slice(b"a.b\0long.bin\0\0\0\0");
         out.extend_from_slice(b"abc\0de");
         out
+    }
+
+    #[test]
+    fn finds_files_by_name_hash() {
+        let mut data = archive();
+        // Stores the hash of "a.b" in the first node.
+        let hash = "a.b".chars().fold(0u32, |hash, ch| (ch as u32).wrapping_add(hash.wrapping_mul(0x65)));
+        data[0x20..0x24].copy_from_slice(&hash.to_le_bytes());
+        assert_eq!(find_hashed(&data, "a.b"), Some(&b"abc"[..]));
+        assert_eq!(find_hashed(&data, "other"), None);
     }
 
     #[test]

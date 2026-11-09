@@ -9,11 +9,10 @@ use crate::LocationInfo;
 use crate::{regions, CrackMap};
 
 use crate::filler::cracks::Crack::{DesertPalace, Zaganaga};
-use std::collections::HashMap;
 
 /// Desert Palace World Graph
-pub(crate) fn graph(crack_map: &CrackMap) -> HashMap<Location, LocationNode> {
-    HashMap::from([
+pub(crate) fn graph(crack_map: &CrackMap) -> crate::DashMap<Location, LocationNode> {
+    crate::DashMap::from_iter([
         (
             DesertPalaceFoyer,
             location(

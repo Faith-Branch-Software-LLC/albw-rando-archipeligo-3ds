@@ -16,7 +16,7 @@ use modinfo::settings::NiceItems;
 use pyo3::prelude::*;
 use rand::seq::IteratorRandom;
 use rand::seq::SliceRandom;
-use rand::{rngs::StdRng, Rng};
+use rand::rngs::StdRng;
 use regex::Regex;
 use serde::{
     ser::{SerializeSeq, SerializeStruct},
@@ -346,6 +346,11 @@ pub fn generate_hints(rng: &mut StdRng, seed_info: &mut SeedInfo, check_map: &mu
     seed_info.hints = Hints { path_hints, always_hints, maiamai_hints, sometimes_hints, custom_hints, bow_of_light_hint, custom_bow_of_light_hint: None };
 }
 
+/// The number of hint ghosts, which is how many hints [`set_custom_hints`] needs.
+pub fn hint_ghost_count() -> usize {
+    HintGhost::iter().len()
+}
+
 /// Create a [`Hints`] object with hints from an external source
 #[cfg_attr(feature = "python", pyfunction)]
 pub fn set_custom_hints(seed_info: &mut SeedInfo, hints: Vec<String>, bow_of_light_hint: String) {
@@ -416,19 +421,19 @@ fn duplicate_hints(
     ghosts.retain(|ghost| !taken_ghosts.contains(ghost));
 
     for hint in always_hints {
-        hint.ghosts.push(ghosts.remove(rng.gen_range(0..ghosts.len())));
+        hint.ghosts.push(ghosts.remove(crate::filler::util::index(rng, ghosts.len())));
     }
 
     for hint in maiamai_hints {
-        hint.ghosts.push(ghosts.remove(rng.gen_range(0..ghosts.len())));
+        hint.ghosts.push(ghosts.remove(crate::filler::util::index(rng, ghosts.len())));
     }
 
     for hint in path_hints {
-        hint.ghosts.push(ghosts.remove(rng.gen_range(0..ghosts.len())));
+        hint.ghosts.push(ghosts.remove(crate::filler::util::index(rng, ghosts.len())));
     }
 
     for hint in sometimes_hints {
-        hint.ghosts.push(ghosts.remove(rng.gen_range(0..ghosts.len())));
+        hint.ghosts.push(ghosts.remove(crate::filler::util::index(rng, ghosts.len())));
     }
 
     assert_eq!(ghosts.len(), 0, "There were leftover Hint Ghosts: {:?}", ghosts);
@@ -627,7 +632,7 @@ fn generate_sometimes_hints(
             break;
         }
 
-        let selected_hint = sometimes_checks.remove(rng.gen_range(0..sometimes_checks.len()));
+        let selected_hint = sometimes_checks.remove(crate::filler::util::index(rng, sometimes_checks.len()));
         let mut location_hint = generate_location_hint(selected_hint, seed_info, check_map);
         if location_hint.choose_ghost(rng, taken_ghosts).is_err() {
             continue;

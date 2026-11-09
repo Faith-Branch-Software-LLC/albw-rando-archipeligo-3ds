@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ALBW Randomizer 3DS</title>
+<style>
+  :root { --bg: #11151f; --card: #1b2130; --ink: #e9e6dc; --muted: #9aa0ad; --gold: #e2b84a; --good: #7fcf8a; --bad: #ef7f7f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; color: var(--gold); }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border-radius: 10px; padding: 16px; margin: 0 0 14px; }
+  h2 { font-size: 17px; margin: 0 0 6px; }
+  p { margin: 0 0 10px; color: var(--muted); }
+  a.button, button { display: inline-block; background: var(--gold); color: #1a1f2e; font-weight: 600; text-decoration: none;
+    border: 0; border-radius: 8px; padding: 10px 16px; font-size: 15px; cursor: pointer; }
+  a.button.off { background: #3a4152; color: var(--muted); pointer-events: none; }
+  #drop { border: 2px dashed #3a4152; border-radius: 10px; padding: 22px; text-align: center; color: var(--muted); }
+  #drop.over { border-color: var(--gold); color: var(--ink); }
+  #status { min-height: 1.5em; margin-top: 10px; }
+  .good { color: var(--good); } .bad { color: var(--bad); }
+  code { color: var(--ink); }
+  footer { color: var(--muted); font-size: 13px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ALBW Randomizer 3DS</h1>
+  <p class="sub">Connected to <span id="player">your 3DS</span>'s console. <span id="live"></span></p>
+
+  <section>
+    <h2>1. Your options</h2>
+    <p>Send this file to the person hosting the multiworld. It comes from the rules on your 3DS.</p>
+    <a class="button" href="/options.yaml">Download options file</a>
+  </section>
+
+  <section>
+    <h2>2. The apworld, for the host</h2>
+    <p>The host puts this in <code>Archipelago/custom_worlds/</code> so the game is "A Link Between Worlds - 3DS".</p>
+    <a class="button" id="apworld" href="/albw_3ds.apworld">Download apworld</a>
+    <p id="apworld-note"></p>
+  </section>
+
+  <section>
+    <h2>3. Send your patch to the 3DS</h2>
+    <p>After the host generates, send the <code>.apalbw3ds</code> file with your name on it.</p>
+    <div id="drop">Drop the file here, or <label><u>choose it</u><input id="file" type="file" accept=".apalbw3ds" hidden></label></div>
+    <div id="status"></div>
+  </section>
+
+  <footer>Made by Faith Branch Software LLC. The Archipelago world is based on randomsalience's albw-archipelago.</footer>
+</main>
+<script>
+  const statusLine = document.getElementById("status");
+  function say(text, kind) { statusLine.textContent = text; statusLine.className = kind || ""; }
+
+  async function send(file) {
+    if (!file.name.toLowerCase().endsWith(".apalbw3ds")) {
+      say("That is not a .apalbw3ds file. Patches for the original apworld end in .apalbw and do not work here.", "bad");
+      return;
+    }
+    say("Sending " + file.name + "...");
+    try {
+      const reply = await fetch("/patch", { method: "POST", headers: { "X-File-Name": encodeURIComponent(file.name) }, body: file });
+      const text = await reply.text();
+      say(text, reply.ok ? "good" : "bad");
+    } catch (err) {
+      say("The 3DS did not answer. Check that it is still on the sharing page.", "bad");
+    }
+  }
+
+  document.getElementById("file").addEventListener("change", (event) => { if (event.target.files[0]) send(event.target.files[0]); });
+  const drop = document.getElementById("drop");
+  drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault(); drop.classList.remove("over");
+    if (event.dataTransfer.files[0]) send(event.dataTransfer.files[0]);
+  });
+
+  function show(state) {
+    if (state.player) document.getElementById("player").textContent = state.player;
+    const link = document.getElementById("apworld");
+    link.classList.toggle("off", !state.apworld);
+    document.getElementById("apworld-note").textContent = state.apworld ? "Version " + state.apworld + "."
+      : "The apworld is not on this 3DS yet. Copy the app's release zip to the SD card, or let the app download it.";
+  }
+
+  function connect() {
+    let socket;
+    try { socket = new WebSocket("ws://" + location.host + "/ws"); } catch (err) { return poll(); }
+    socket.onopen = () => { document.getElementById("live").textContent = "Live."; };
+    socket.onmessage = (event) => { try { show(JSON.parse(event.data)); } catch (err) {} };
+    socket.onclose = () => { document.getElementById("live").textContent = "Disconnected."; setTimeout(connect, 3000); };
+  }
+  async function poll() {
+    try { show(await (await fetch("/status")).json()); } catch (err) {}
+  }
+  poll();
+  connect();
+</script>
+</body>
+</html>

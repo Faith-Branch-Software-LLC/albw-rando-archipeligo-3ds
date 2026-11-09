@@ -1,12 +1,16 @@
 //! Draws the view that `ui_core::menu` produces.
 
 use ui_core::display::Display;
-use ui_core::menu::{View, ROW_GAP, ROW_HEIGHT, ROW_LEFT, ROW_TOP, ROW_WIDTH, VALUE_CENTER, VALUE_LEFT, VISIBLE_ROWS};
+use ui_core::menu::{
+    pill_spans, step_lefts, Layout, Pills, View, PILL_HEIGHT, PILL_TOP, PILL_WIDTH, ROW_HEIGHT, ROW_LEFT, ROW_TOP,
+    ROW_WIDTH, STEP_WIDTH, VALUE_CENTER, VALUE_LEFT,
+};
 
 use std::ffi::c_void;
 
 use crate::draw::{self, Font, CENTER, LEFT, RIGHT};
 use crate::icons::Icons;
+use crate::model_view::Preview;
 
 /// Text scales for the sizes picked on the Display page. citro2d draws any font with 30 pixel glyph
 /// cells at scale 1. Rows, hints and the top screen text share one size so the screens look even.
@@ -50,14 +54,23 @@ fn note_once(line: &str) {
 }
 
 /// `top_art`, if loaded, replaces the plain top screen.
-pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, display: Display) {
+/// `preview`, if given, is a model and its turn in radians, drawn below the rows.
+pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, display: Display, preview: Option<(&Preview, f32)>) {
     let sizes = Sizes::new(display);
     draw::frame(
         || match top_art {
             Some(art) => draw_top_art(view, art, sizes),
             None => draw_top(view, sizes),
         },
-        || draw_bottom(view, icons, sizes),
+        || {
+            draw_bottom(view, icons, sizes);
+            if let Some((model, angle)) = preview {
+                // Below the rows and above the hint.
+                let top = view.layout.top(view.rows.len()) + 4.0;
+                let bottom = 204.0;
+                model.draw(160.0, (top + bottom) / 2.0, bottom - top, angle, 320);
+            }
+        },
     );
 }
 
@@ -92,7 +105,123 @@ fn draw_top(view: &View, sizes: Sizes) {
     }
 }
 
+/// Text scale that fits a line in a pill's height, at most the chosen text size.
+fn pill_scale(sizes: Sizes) -> f32 {
+    let per_scale = draw::line_height(1.0);
+    if per_scale > 0.0 { sizes.text.min((PILL_HEIGHT - 2.0) / per_scale) } else { sizes.text }
+}
+
+/// Draws text centered in a box, made smaller if it is too wide.
+fn centered(content: &str, x: f32, y: f32, w: f32, h: f32, scale: f32, color: u32) {
+    let scale = {
+        let width = draw::text_width(Font::Body, content, scale);
+        if width > w - 6.0 && width > 0.0 { scale * (w - 6.0) / width } else { scale }
+    };
+    draw::text(content, x + w / 2.0, y + (h - draw::line_height(scale)) / 2.0, scale, color, CENTER);
+}
+
+/// Plain rectangles only, so art can later stretch one pill image to any width.
+fn draw_pills(pills: &Pills, top: f32, scale: f32) {
+    match pills {
+        Pills::Choices { names, selected } => {
+            for (index, (left, width)) in pill_spans(names.len()).enumerate() {
+                let picked = index == *selected;
+                draw::rect(left, top, width, PILL_HEIGHT, if picked { draw::GOLD } else { draw::WELL });
+                centered(&names[index], left, top, width, PILL_HEIGHT, scale, if picked { draw::INK } else { draw::MUTED });
+            }
+        }
+        Pills::Number { value, min, max } => {
+            for (left, sign) in step_lefts().into_iter().zip(["-", "+"]) {
+                draw::rect(left, top, STEP_WIDTH, PILL_HEIGHT, draw::WELL);
+                centered(sign, left, top, STEP_WIDTH, PILL_HEIGHT, scale, draw::GOLD);
+            }
+            let left = step_lefts()[0] + STEP_WIDTH + 4.0;
+            let width = PILL_WIDTH - 2.0 * (STEP_WIDTH + 4.0);
+            let fraction = if max > min { (value - min) as f32 / (max - min) as f32 } else { 0.0 };
+            draw::rect(left, top, width, PILL_HEIGHT, draw::WELL);
+            draw::rect(left, top + PILL_HEIGHT - 3.0, width * fraction, 3.0, draw::GOLD);
+            centered(&value.to_string(), left, top, width, PILL_HEIGHT - 2.0, scale, draw::WHITE);
+        }
+    }
+}
+
+/// Rules pages: each setting is a card with its name on top and its choices below.
+fn draw_cards(view: &View, icons: &Icons, sizes: Sizes) {
+    let layout = view.layout;
+    let icon_size = 18.0;
+    let pill_text = pill_scale(sizes);
+    let name_scale = (PILL_TOP - 8.0) / draw::line_height(1.0).max(1.0);
+    let name_scale = sizes.text.min(name_scale);
+    for (slot, row) in view.rows.iter().enumerate() {
+        let y = layout.top(slot);
+        draw::rect(ROW_LEFT, y, ROW_WIDTH, layout.height, if row.focused { draw::CARD_ACTIVE } else { draw::CARD });
+        if row.focused {
+            draw::rect(ROW_LEFT, y, 3.0, layout.height, draw::GOLD);
+        }
+        let mut name_left = ROW_LEFT + 10.0;
+        if let Some((name, image)) = row.icon.and_then(|name| Some((name, icons.get(name)?))) {
+            draw::icon(image, name_left, y + 4.0, icon_size, ui_core::icons::extra_turns(name));
+            name_left += icon_size + 4.0;
+        }
+        let name_top = y + (PILL_TOP - draw::line_height(name_scale)) / 2.0;
+        let color = if row.focused { draw::WHITE } else { draw::MUTED };
+        draw::text_fit(Font::Body, &row.label, name_left, name_top, name_scale, ROW_LEFT + ROW_WIDTH - 8.0 - name_left, color, LEFT);
+        if let Some(pills) = &row.pills {
+            draw_pills(pills, y + PILL_TOP, pill_text);
+        }
+    }
+    draw_scrollbar(view);
+    draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
+}
+
+fn draw_scrollbar(view: &View) {
+    let layout = view.layout;
+    if view.total_rows > layout.visible {
+        let track_height = layout.visible as f32 * layout.pitch() - layout.gap;
+        let thumb = track_height * layout.visible as f32 / view.total_rows as f32;
+        let offset = track_height * view.scroll as f32 / view.total_rows as f32;
+        draw::rect(314.0, ROW_TOP, 3.0, track_height, draw::TRACK);
+        draw::rect(314.0, ROW_TOP + offset, 3.0, thumb, draw::GOLD);
+    }
+}
+
+/// Spoiler entries: the place in small text over what it holds.
+fn draw_lines(view: &View, sizes: Sizes) {
+    let layout = view.layout;
+    let per_scale = draw::line_height(1.0).max(1.0);
+    let small = (sizes.text * 0.85).min(18.0 / per_scale);
+    let large = sizes.text.min(22.0 / per_scale);
+    let room = ROW_WIDTH - 20.0;
+    for (slot, row) in view.rows.iter().enumerate() {
+        let y = layout.top(slot);
+        draw::rect(ROW_LEFT, y, ROW_WIDTH, layout.height, if row.focused { draw::CARD_ACTIVE } else { draw::CARD });
+        if row.focused {
+            draw::rect(ROW_LEFT, y, 3.0, layout.height, draw::GOLD);
+        }
+        let left = ROW_LEFT + 10.0;
+        match &row.value {
+            Some(value) => {
+                draw::text_fit(Font::Body, &row.label, left, y + 3.0, small, room, draw::MUTED, LEFT);
+                let color = if row.focused { draw::GOLD } else { draw::WHITE };
+                draw::text_fit(Font::Body, value, left, y + layout.height - 3.0 - draw::line_height(large), large, room, color, LEFT);
+            }
+            None => {
+                let top = y + (layout.height - draw::line_height(large)) / 2.0;
+                draw::text_fit(Font::Body, &row.label, left, top, large, room, draw::MUTED, LEFT);
+            }
+        }
+    }
+    draw_scrollbar(view);
+    draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
+}
+
 fn draw_bottom(view: &View, icons: &Icons, sizes: Sizes) {
+    if view.layout == Layout::CARDS {
+        return draw_cards(view, icons, sizes);
+    }
+    if view.layout == Layout::LINES {
+        return draw_lines(view, sizes);
+    }
     let shift = if view.rows.iter().any(|row| row.icon.is_some_and(|name| icons.get(name).is_some())) { ICON_SPACE } else { 0.0 };
     let label_left = ROW_LEFT + 10.0 + shift;
     let label_room = |has_value: bool| if has_value { VALUE_LEFT - 4.0 - label_left } else { ROW_LEFT + ROW_WIDTH - 8.0 - label_left };
@@ -117,7 +246,7 @@ fn draw_bottom(view: &View, icons: &Icons, sizes: Sizes) {
     }
     let text_y = (ROW_HEIGHT - draw::line_height(scale)) / 2.0;
     for (slot, row) in view.rows.iter().enumerate() {
-        let y = ROW_TOP + slot as f32 * (ROW_HEIGHT + ROW_GAP);
+        let y = Layout::ROWS.top(slot);
         draw::rect(ROW_LEFT, y, ROW_WIDTH, ROW_HEIGHT, if row.focused { draw::CARD_ACTIVE } else { draw::CARD });
         if row.focused {
             draw::rect(ROW_LEFT, y, 3.0, ROW_HEIGHT, draw::GOLD);
@@ -139,12 +268,6 @@ fn draw_bottom(view: &View, icons: &Icons, sizes: Sizes) {
             }
         }
     }
-    if view.total_rows > VISIBLE_ROWS {
-        let track_height = VISIBLE_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
-        let thumb = track_height * VISIBLE_ROWS as f32 / view.total_rows as f32;
-        let offset = track_height * view.scroll as f32 / view.total_rows as f32;
-        draw::rect(314.0, ROW_TOP, 3.0, track_height, draw::TRACK);
-        draw::rect(314.0, ROW_TOP + offset, 3.0, thumb, draw::GOLD);
-    }
+    draw_scrollbar(view);
     draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
 }

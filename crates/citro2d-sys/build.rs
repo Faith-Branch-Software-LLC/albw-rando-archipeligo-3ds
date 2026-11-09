@@ -4,10 +4,19 @@ use std::env;
 
 fn main() {
     println!("cargo:rerun-if-changed=shim/shim.c");
+    println!("cargo:rerun-if-changed=shim/model.v.pica");
     println!("cargo:rerun-if-env-changed=DEVKITPRO");
 
     let devkitpro = env::var("DEVKITPRO").expect("DEVKITPRO is not set. Install devkitPro 3ds-dev.");
     let devkitarm = env::var("DEVKITARM").unwrap_or_else(|_| format!("{devkitpro}/devkitARM"));
+
+    // Assembles the model preview shader. The app embeds the result with `include_bytes!`.
+    let out = env::var("OUT_DIR").expect("cargo sets OUT_DIR");
+    let status = std::process::Command::new(format!("{devkitpro}/tools/bin/picasso"))
+        .args(["-o", &format!("{out}/model.shbin"), "shim/model.v.pica"])
+        .status()
+        .expect("picasso runs; install devkitPro 3ds-dev");
+    assert!(status.success(), "picasso could not assemble shim/model.v.pica");
 
     cc::Build::new()
         .compiler(format!("{devkitarm}/bin/arm-none-eabi-gcc"))

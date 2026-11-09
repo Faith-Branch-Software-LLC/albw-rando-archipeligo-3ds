@@ -210,3 +210,159 @@ void shim_text(const char *utf8, float x, float y, float scale, uint32_t color) 
     C2D_TextOptimize(&text);
     C2D_DrawText(&text, C2D_WithColor, x, y, 0.0f, scale, scale, color);
 }
+
+// ---- Model previews ----
+// A model is one vertex buffer of position (3 floats) and texture coordinate (2 floats), split
+// into meshes that each use one texture. It is drawn over the 2D scene with its own shader, then
+// citro2d's state is put back.
+
+#define MODEL_MAX_TEXTURES 48
+#define MODEL_MAX_MESHES 64
+
+typedef struct {
+    int first;
+    int count;
+    int texture;
+    int alpha_cutoff;
+    GPU_TEXTURE_WRAP_PARAM wrap_u, wrap_v;
+} ShimMesh;
+
+typedef struct {
+    float *vertices;
+    int vertex_count;
+    C3D_Tex textures[MODEL_MAX_TEXTURES];
+    int texture_count;
+    ShimMesh meshes[MODEL_MAX_MESHES];
+    int mesh_count;
+} ShimModel;
+
+static DVLB_s *model_dvlb;
+static shaderProgram_s model_program;
+static int model_projection_at;
+static int model_view_at;
+
+// shbin must stay in memory for as long as the app runs.
+bool shim_model_init(const void *shbin, u32 size) {
+    model_dvlb = DVLB_ParseFile((u32 *)shbin, size);
+    if (!model_dvlb) return false;
+    shaderProgramInit(&model_program);
+    shaderProgramSetVsh(&model_program, &model_dvlb->DVLE[0]);
+    model_projection_at = shaderInstanceGetUniformLocation(model_program.vertexShader, "projection");
+    model_view_at = shaderInstanceGetUniformLocation(model_program.vertexShader, "modelView");
+    return true;
+}
+
+// vertices holds vertex_count vertices of 5 floats. Returns NULL if memory is short.
+void *shim_model_create(const float *vertices, int vertex_count) {
+    ShimModel *model = calloc(1, sizeof(ShimModel));
+    if (!model) return NULL;
+    size_t size = (size_t)vertex_count * 5 * sizeof(float);
+    model->vertices = linearAlloc(size);
+    if (!model->vertices) {
+        free(model);
+        return NULL;
+    }
+    memcpy(model->vertices, vertices, size);
+    GSPGPU_FlushDataCache(model->vertices, size);
+    model->vertex_count = vertex_count;
+    return model;
+}
+
+// Adds a texture already in the GPU's layout. Returns its index, or -1.
+int shim_model_add_texture(void *handle, int format, int width, int height, const u8 *pixels, size_t size) {
+    ShimModel *model = handle;
+    if (model->texture_count >= MODEL_MAX_TEXTURES) return -1;
+    C3D_Tex *tex = &model->textures[model->texture_count];
+    if (!C3D_TexInit(tex, width, height, (GPU_TEXCOLOR)format)) return -1;
+    if (size > tex->size) size = tex->size;
+    memcpy(tex->data, pixels, size);
+    C3D_TexFlush(tex);
+    C3D_TexSetFilter(tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(tex, GPU_REPEAT, GPU_REPEAT);
+    return model->texture_count++;
+}
+
+// texture is an index from shim_model_add_texture or -1 for none; alpha_cutoff is 0 to 255 or -1.
+// wrap_u and wrap_v are GPU_TEXTURE_WRAP_PARAM values. They belong to the mesh's material, and
+// two materials can share a texture, so they are set on the texture as each mesh is drawn.
+bool shim_model_add_mesh(void *handle, int first, int count, int texture, int alpha_cutoff, int wrap_u, int wrap_v) {
+    ShimModel *model = handle;
+    if (model->mesh_count >= MODEL_MAX_MESHES) return false;
+    model->meshes[model->mesh_count++] = (ShimMesh){ first, count, texture, alpha_cutoff, (GPU_TEXTURE_WRAP_PARAM)(wrap_u & 3), (GPU_TEXTURE_WRAP_PARAM)(wrap_v & 3) };
+    return true;
+}
+
+// Call between frames.
+void shim_model_free(void *handle) {
+    ShimModel *model = handle;
+    if (!model) return;
+    for (int i = 0; i < model->texture_count; i++) C3D_TexDelete(&model->textures[i]);
+    linearFree(model->vertices);
+    free(model);
+}
+
+// Draws the model on the current 2D scene, standing with its feet-to-head height scaled to
+// height pixels and centered at (x, y), turned by angle radians about its upright axis.
+// center is the middle of the model's bounding box, and size its height and widest reach.
+void shim_model_draw(void *handle, float x, float y, float height, float angle, float cx, float cy, float cz,
+                     float model_height, float model_reach, int screen_width) {
+    ShimModel *model = handle;
+    if (!model || model_height <= 0.0f) return;
+    C2D_Flush();
+
+    C3D_BindProgram(&model_program);
+    C3D_AttrInfo *attr = C3D_GetAttrInfo();
+    AttrInfo_Init(attr);
+    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 3);
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+    C3D_BufInfo *buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, model->vertices, 5 * sizeof(float), 2, 0x10);
+
+    // The same projection citro2d uses, so x and y are screen pixels.
+    C3D_Mtx projection;
+    Mtx_OrthoTilt(&projection, 0.0f, (float)screen_width, 240.0f, 0.0f, 1.0f, -1.0f, true);
+    float scale = height / model_height;
+    // Depth stays between 0.1 and 0.9, in front of citro2d's shapes at 0.
+    float depth_scale = model_reach > 0.0f ? 0.4f / model_reach : 0.0f;
+    C3D_Mtx view;
+    Mtx_Identity(&view);
+    Mtx_Translate(&view, x, y, 0.5f, true);
+    Mtx_Scale(&view, scale, -scale, depth_scale);
+    Mtx_RotateY(&view, angle, true);
+    Mtx_Translate(&view, -cx, -cy, -cz, true);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, model_projection_at, &projection);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, model_view_at, &view);
+
+    for (int stage = 1; stage < 6; stage++) C3D_TexEnvInit(C3D_GetTexEnv(stage));
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+    C3D_CullFace(GPU_CULL_NONE);
+
+    for (int i = 0; i < model->mesh_count; i++) {
+        ShimMesh *mesh = &model->meshes[i];
+        C3D_TexEnvInit(env);
+        if (mesh->texture >= 0) {
+            C3D_TexSetWrap(&model->textures[mesh->texture], mesh->wrap_u, mesh->wrap_v);
+            C3D_TexBind(0, &model->textures[mesh->texture]);
+            C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, 0, 0);
+        } else {
+            C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, 0, 0);
+            C3D_TexEnvColor(env, 0xFFC0C0C0);
+        }
+        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        if (mesh->alpha_cutoff >= 0) {
+            C3D_AlphaTest(true, GPU_GEQUAL, mesh->alpha_cutoff);
+        } else {
+            C3D_AlphaTest(false, GPU_ALWAYS, 0);
+        }
+        C3D_DrawArrays(GPU_TRIANGLES, mesh->first, mesh->count);
+    }
+
+    // Puts back what citro2d expects.
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA,
+                   GPU_ONE_MINUS_SRC_ALPHA);
+    C2D_Prepare();
+}

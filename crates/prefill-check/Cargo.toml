@@ -1,0 +1,12 @@
+[package]
+name = "prefill-check"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Prints what randomize_pre_fill makes for a set of seeds, to compare 32-bit and 64-bit builds"
+
+[dependencies]
+modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
+randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
+serde_json = "1"
+ui-core = { path = "../ui-core" }

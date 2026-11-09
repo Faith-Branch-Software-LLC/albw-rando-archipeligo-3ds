@@ -1,0 +1,590 @@
+from typing import Dict, List, Optional, Set, Any
+import asyncio
+import traceback
+from BaseClasses import ItemClassification
+from CommonClient import ClientCommandProcessor, CommonContext, get_base_parser, gui_enabled, logger, server_loop
+from NetUtils import ClientStatus
+from Patch import create_rom_file
+from .Interface import N3DSInterface, ConnectionError
+from .Locations import LocationData, LocationType, all_locations, location_table
+from .Items import item_code_table
+from .Data import flag_data, nice_items, scoot_fruit_flag, golden_bee_flag
+from .Utils import albw_base_id
+import Utils
+import random
+import os
+import logging
+
+TITLE_ID = 0x00040000000EC300
+
+triple_addr = ""
+is_3ds = False
+
+def bytes_or(a: bytes, b: bytes) -> bytes:
+    return bytes([x | y for x,y in zip(a,b)])
+
+class ALBWCommandProcessor(ClientCommandProcessor):
+    def _cmd_3ds(self, address):
+        """Connect to a real 3ds"""
+        global triple_addr
+        if triple_addr == "":
+            triple_addr = address
+        else:
+            self.output("Already connected to a 3ds")
+    
+    def _cmd_3dsdisconnect(self):
+        """Disconnect from a 3ds"""
+        global triple_addr
+        if triple_addr == "":
+            self.output("Not currently connected to a 3ds")
+        else:
+            self.output(f"Disconnected from {triple_addr}.")
+            triple_addr = ""
+
+class ALBWClientContext(CommonContext):
+    command_processor = ALBWCommandProcessor
+    game: Optional[str] = "A Link Between Worlds - 3DS"
+    items_handling: Optional[int] = 0b101 # receive remote items and starting inventory
+    want_slot_data: bool = True
+
+    interface: N3DSInterface = N3DSInterface()
+    interface_connected: bool
+    server_connected: bool
+    initial_connect: bool
+    seed: int
+    get_item_ptr: int
+    received_items_count_ptr: int
+    deathlink_flag_ptr: int
+    in_game_flag_ptr: int
+    save_validated: bool
+    slot_data: Optional[Dict[str, Any]]
+    save_ptr: int
+    event_flags_ptr: int
+    course_flags_ptr: int
+    minigame_ptr: int
+    player_singleton_ptr: int
+    player_ptr: int
+    event_flags: bytes
+    course_flags: List[bytes]
+    minigame_flags: int
+    messages: List[Any]
+    server_storage_flags: Set[str]
+    shuffle_maiamai_rewards: bool
+    last_maiamai_count: int
+    maiamai_count: int
+    course: int
+    stage: int
+    new_stage: bool
+    inventory: List[int]
+    health: int
+    received_items_count: int
+    current_item: int
+    ravio_scouted: bool
+    get_hints: bool
+    to_hint: List[int]
+    invalid: bool
+    last_error: str
+    show_citra_connect_message: bool
+    show_triple_connected_message: bool
+
+    AP_HEADER_LOCATION: int = 0x6fe5f8
+    SAVES_LOCATION: int = 0x711de8
+    EVENTS_LOCATION: int = 0x70b728
+    COURSES_LOCATION: int = 0x70c8e0
+    MINIGAME_LOCATION: int = 0x70d858
+    GAME_LOCATION: int = 0x709df8
+    PLAYER_SINGLETON_LOCATION: int = 0x70fb60
+    SYSTEM_LOCATION: int = 0x712468
+    TASK_MAIN_GAME_VTABLE: int = 0x6d1db4
+    RAVIO_ITEM: List[int] = [4, 3, 11, 6, 2, 8, 9, 10, 7]
+
+    def __init__(self, server_address: Optional[str], password: Optional[str]):
+        super().__init__(server_address, password)
+        self.interface_connected = False
+        self.server_connected = False
+        self.initial_connect = True
+        self.save_validated = False
+        self.slot_data = None
+        self.course_flags = []
+        self.messages = []
+        self.server_storage_flags = set()
+        self.shuffle_maiamai_rewards = False
+        self.last_maiamai_count = 0
+        self.maiamai_count = 0
+        self.course = -1
+        self.stage = -1
+        self.new_stage = False
+        self.inventory = [0 for _ in range(50)]
+        self.health = 1
+        self.received_items_count = 0
+        self.current_item = 0xffffffff
+        self.ravio_scouted = False
+        self.get_hints = False
+        self.to_hint = []
+        self.invalid = False
+        self.last_error = ""
+        self.show_citra_connect_message = True
+        self.show_triple_connected_message = True
+        self.received_deathlink = False
+        self.sent_deathlink = False
+        self.link_is_dead = False
+
+        self.deathlink_msgs = [
+            "ran out of hearts.",
+            "blew themselves up.",
+            "shot themselves in the foot.",
+            "burned themselves to death with their fire rod",
+            "ran into a lynel.",
+            "ran out of stamina while on a cliff.",
+            "fell, again.",
+            "thought they had a fairy.",
+            "forgot to buy a potion.",
+            "got out of bounds and went a bit too far",
+            "got stuck between a wall and hard place.",
+            "got stuck IN a wall.",
+            "got scammed by Ravio.",
+            "got stung by a bee."
+        ]
+
+    def run_gui(self) -> None:
+        from kvui import GameManager
+
+        class ALBWManager(GameManager):
+            base_title: str = "Archipelago A Link Between Worlds - 3DS Client"
+
+        self.ui = ALBWManager(self)
+        assert self.ui is not None
+        self.ui_task = asyncio.create_task(self.ui.async_run(), name="UI")
+    
+    def error(self, error: str) -> None:
+        if error != self.last_error:
+            logger.error(error)
+            self.last_error = error
+        self.invalid = True
+    
+    async def read_header(self) -> None:
+        magic = await self.interface.read(self.AP_HEADER_LOCATION, 4)
+        if magic != b"ARCH":
+            self.error("The running game was not patched with an Archipelago patch.")
+            return
+
+        data_version = await self.interface.read_u32(self.AP_HEADER_LOCATION + 4)
+        if data_version <= 2:
+            self.error("The running game was patched with an older version of the apworld, you must re-patch the game.")
+            return
+
+        self.seed = await self.interface.read_u32(self.AP_HEADER_LOCATION + 8)
+
+        name = await self.interface.read(self.AP_HEADER_LOCATION + 0x10, 0x40)
+        end = name.find(0)
+        if end != -1:
+            name = name[:end]
+        self.auth = name.decode("utf-8")
+
+        ap_data_ptr = await self.interface.read_u32(self.AP_HEADER_LOCATION + 0xc)
+        self.get_item_ptr = ap_data_ptr
+        self.received_items_count_ptr = ap_data_ptr + 4
+        self.deathlink_flag_ptr = ap_data_ptr + 8
+        self.in_game_flag_ptr = ap_data_ptr + 0xc
+    
+    async def validate_save(self) -> None:
+        display_message = not self.save_validated
+        self.save_validated = False
+        self.save_ptr = 0
+        all_saves_ptr = await self.interface.read_u32(self.SAVES_LOCATION)
+        if all_saves_ptr != 0:
+            self.save_ptr = await self.interface.read_u32(all_saves_ptr + 0x14)
+        if all_saves_ptr == 0 or self.save_ptr == 0 or await self.interface.read_u32(self.save_ptr + 0x1600) != 0:
+            self.invalid = True
+            self.last_error = ""
+        elif await self.interface.read(self.save_ptr + 0xde0, 4) != b"ARCH":
+            self.error("The loaded save file is not an Archipelago save file. Choose a different save file.")
+        elif await self.interface.read_u32(self.save_ptr + 0xde8) != self.seed:
+            self.error("The loaded save file was created for a different multiworld. Choose a different save file.")
+        else:
+            self.save_validated = True
+            if display_message:
+                logger.info("Connected and good to go!")
+
+    async def validate_seed(self) -> None:
+        if not self.server_connected or not self.slot_data:
+            self.invalid = True
+        elif self.seed != self.slot_data["seed"]:
+            self.error("The patch was created for a different multiworld. Make sure you are using the right patch and connecting to the correct multiworld.")
+
+    async def server_auth(self, password_requested: bool = False) -> None:
+        if password_requested and not self.password:
+            await super(ALBWClientContext, self).server_auth(password_requested)
+        if not self.auth:
+            logger.info("Connected to the multiworld, awaiting connection to game to authenticate with server")
+        while not self.auth and not self.exit_event.is_set():
+            await asyncio.sleep(1)
+        await self.send_connect()
+    
+    def on_package(self, cmd: str, args: dict) -> None:
+        if cmd == "Connected":
+            self.slot_data = args["slot_data"]
+            if "death_link" in args["slot_data"]:
+                Utils.async_start(self.update_death_link(
+                    bool(args["slot_data"]["death_link"])))
+            if "shuffle_maiamai_rewards" in args["slot_data"]:
+                self.shuffle_maiamai_rewards = bool(args["slot_data"]["shuffle_maiamai_rewards"])
+            self.server_connected = True
+
+        if cmd == "LocationInfo" and self.get_hints:
+            self.get_hints = False
+            self.to_hint = [loc.location for loc in args["locations"]
+                if loc.flags & (ItemClassification.progression | ItemClassification.useful)]
+
+    async def get_pointers(self) -> bool:
+        self.event_flags_ptr = await self.interface.read_u32(self.EVENTS_LOCATION)
+        self.course_flags_ptr = await self.interface.read_u32(self.COURSES_LOCATION)
+        self.minigame_ptr = await self.interface.read_u32(self.MINIGAME_LOCATION)
+        self.game_ptr = await self.interface.read_u32(self.GAME_LOCATION)
+        self.player_singleton_ptr = await self.interface.read_u32(self.PLAYER_SINGLETON_LOCATION)
+        if self.player_singleton_ptr != 0:
+            self.player_ptr = await self.interface.read_u32(self.player_singleton_ptr + 0x10)
+        if self.event_flags_ptr == 0 or self.course_flags_ptr == 0 or self.minigame_ptr == 0 or self.game_ptr == 0 \
+                                        or self.player_ptr == 0 or self.player_singleton_ptr == 0:
+            return False
+        return True
+
+    async def is_in_game(self) -> bool:
+        return await self.interface.read_u32(self.in_game_flag_ptr) != 0
+
+    async def read_data(self) -> None:
+        cur_event_flags = await self.interface.read(self.event_flags_ptr + 0x48, 0x80)
+        save_event_flags = await self.interface.read(self.save_ptr + 0x40, 0x80)
+        self.event_flags = bytes_or(cur_event_flags, save_event_flags)
+
+        cur_minigame_flags = await self.interface.read_u8(self.minigame_ptr + 0x35)
+        save_minigame_flags = await self.interface.read_u8(self.save_ptr + 0xda5)
+        self.minigame_flags = cur_minigame_flags | save_minigame_flags
+
+        self.course_flags = []
+        for course in range(0, 24):
+            cur_course_flags = (await self.interface.read(self.course_flags_ptr + course * 0x16c + 0x160, 0x20)) \
+                             + (await self.interface.read(self.course_flags_ptr + course * 0x16c + 0x1a0, 0x10))
+            save_course_flags = await self.interface.read(self.save_ptr + 0x560 + course * 0x40, 0x40)
+            self.course_flags.append(bytes_or(cur_course_flags, save_course_flags))
+
+        inventory = await self.interface.read(self.player_ptr + 0x434, 0xc8)
+        self.inventory = [int.from_bytes(inventory[4 * i : 4 * i + 4], "little") for i in range(50)]
+        self.maiamai_count = await self.interface.read_u8(self.player_ptr + 0x508)
+        self.health = await self.interface.read_u8(self.player_ptr + 0x598)
+        self.received_items_count = await self.interface.read_u32(self.received_items_count_ptr)
+        self.current_item = await self.interface.read_u32(self.get_item_ptr)
+
+        course = await self.interface.read_u8(self.game_ptr + 0x18)
+        stage = await self.interface.read_u32(self.game_ptr + 0x1c)
+
+        if course != self.course:
+            logger.debug(f"Changing course to {course}")
+            self.messages.append({
+                "cmd": "Bounce",
+                "slots": [self.slot],
+                "data": {"albw_course": course},
+            })
+
+        self.new_stage = course != self.course or stage != self.stage
+        self.course = course
+        self.stage = stage
+
+    async def read_inventory(self) -> None:
+        self.inventory = [await self.interface.read_u32(self.player_ptr + 0x434 + 4 * i) for i in range(50)]
+        self.maiamai_count = int.from_bytes(await self.interface.read(self.player_ptr + 0x508, 1), "little")
+
+    def check_flag(self, course: Optional[int], flag: int) -> bool:
+        byte = flag >> 3
+        mask = 1 << (flag & 7)
+        if course is None:
+            return self.event_flags[byte] & mask != 0
+        else:
+            return self.course_flags[course][byte] & mask != 0
+
+    def check_location(self, loc: LocationData):
+        if loc.code is not None and loc.flag is not None:
+            if self.check_flag(loc.course, loc.flag):
+                return True
+            if loc.course == 0 and loc.flag >= 0x100:
+                if self.check_flag(2, loc.flag) or self.check_flag(4, loc.flag):
+                    return True
+            if loc.course == 1 and loc.flag >= 0x100:
+                if self.check_flag(3, loc.flag) or self.check_flag(5, loc.flag):
+                    return True
+        if loc.name == "Hyrule Hotfoot 75s" and self.minigame_flags & 1 != 0:
+            return True
+        return False
+
+    def check_all_locations(self) -> None:
+        updated_flags = {}
+        for flag, name in flag_data:
+            if self.check_flag(None, flag) and not name in self.server_storage_flags:
+                self.server_storage_flags.add(name)
+                updated_flags[name] = True
+        
+        for slot, name in nice_items:
+            if self.inventory[slot] == 3 and not name in self.server_storage_flags:
+                self.server_storage_flags.add(name)
+                updated_flags[name] = True
+
+        if self.inventory[16] != 0 and not scoot_fruit_flag in self.server_storage_flags:
+            self.server_storage_flags.add(scoot_fruit_flag)
+            updated_flags[scoot_fruit_flag] = True
+        
+        has_golden_bee = False
+        for slot in range(45, 50):
+            if self.inventory[slot] == 7:
+                has_golden_bee = True
+                break
+        if has_golden_bee and not golden_bee_flag in self.server_storage_flags:
+            self.server_storage_flags.add(golden_bee_flag)
+            updated_flags[golden_bee_flag] = True
+
+        checks = []
+        for loc in all_locations:
+            if self.check_location(loc):
+                code = loc.true_code()
+                assert code is not None
+                if code not in self.locations_checked:
+                    self.locations_checked.add(code)
+                    checks.append(code)
+                if loc.loctype == LocationType.Maiamai and not loc.name in self.server_storage_flags:
+                    self.server_storage_flags.add(loc.name)
+                    updated_flags[loc.name] = True
+
+        if len(updated_flags) > 0:
+            logger.debug("Updating flags " + ", ".join(updated_flags.keys()))
+            self.messages.append({
+                "cmd": "Set",
+                "key": f"albw_flags_{self.slot}",
+                "default": {},
+                "want_reply": False,
+                "operations": [{
+                    "operation": "update",
+                    "value": updated_flags,
+                }],
+            })
+
+        if self.maiamai_count != self.last_maiamai_count:
+            self.last_maiamai_count = self.maiamai_count
+            logger.debug(f"Updating maiamai count: {self.maiamai_count}")
+            self.messages.append({
+                "cmd": "Set",
+                "key": f"albw_maiamai_{self.slot}",
+                "default": 0,
+                "want_reply": False,
+                "operations": [{
+                    "operation": "replace",
+                    "value": self.maiamai_count,
+                }]
+            })
+
+        if len(checks) > 0:
+            self.messages.append({
+                "cmd": "LocationChecks",
+                "locations": checks,
+            })
+
+        if self.check_flag(None, 685):
+            self.messages.append({
+                "cmd": "StatusUpdate",
+                "status": ClientStatus.CLIENT_GOAL,
+            })
+
+    def scout_hints(self) -> None:
+        if not self.ravio_scouted and self.check_location(location_table["Ravio's Gift"]):
+            ravio_locations = [loc.true_code() for loc in all_locations if loc.loctype == LocationType.Ravio]
+            self.messages.append({
+                "cmd": "LocationScouts",
+                "create_as_hint": 0,
+                "locations": ravio_locations,
+            })
+            self.get_hints = True
+            self.ravio_scouted = True
+        
+        if self.new_stage and self.course == 0 and self.stage == 15:
+            merchant_locations = [22 + albw_base_id] # Street Merchant (Left)
+            if "shady_guy" in self.server_storage_flags:
+                merchant_locations.append(23 + albw_base_id) # Street Merchant (Right)
+            self.messages.append({
+                "cmd": "LocationScouts",
+                "create_as_hint": 0,
+                "locations": merchant_locations,
+            })
+            self.get_hints = True
+
+        if self.shuffle_maiamai_rewards and self.new_stage and self.course == 4 and self.stage == 14:
+            maiamai_locations = [loc.true_code() for loc in all_locations if loc.loctype == LocationType.Upgrade]
+            seen_maiamai_locations = [code for i, code in enumerate(maiamai_locations[:9]) if self.inventory[self.RAVIO_ITEM[i]] != 0]
+            self.messages.append({
+                "cmd": "LocationScouts",
+                "create_as_hint": 0,
+                "locations": seen_maiamai_locations,
+            })
+            self.get_hints = True
+
+        if self.to_hint:
+            self.messages.append({
+                "cmd": "LocationScouts",
+                "create_as_hint": 2,
+                "locations": self.to_hint,
+            })
+            self.to_hint = []
+    
+    async def handle_deathlink(self) -> None:
+        if self.received_deathlink:
+            if self.health != 0:
+                logger.debug("Setting deathlink flag")
+                await self.interface.write_u32(self.deathlink_flag_ptr, 0x1)
+                self.sent_deathlink = True
+            else:
+                logger.debug("Deathlink received but link already dead")
+            self.received_deathlink = False
+
+        if self.health == 0 and not self.link_is_dead:
+            if not self.sent_deathlink:
+                logger.info("Link died")
+                assert self.slot is not None
+                await self.send_death(self.player_names[self.slot] + " " + random.choice(self.deathlink_msgs))
+                self.sent_deathlink = True
+            else :
+                logger.debug("Link died due to death link")
+            self.link_is_dead = True
+
+        if self.health > 0 and self.link_is_dead:
+            #Back to being alive
+            logger.debug(f"Link back to life")
+            self.link_is_dead = False
+            self.sent_deathlink = False
+
+    def on_deathlink(self, data: Dict[str, Any]) -> None:
+        """Gets dispatched when a new DeathLink is triggered by another linked player."""
+        self.received_deathlink = True
+        super().on_deathlink(data)
+
+    async def get_item(self) -> None:
+        if len(self.items_received) > self.received_items_count and self.current_item == 0xffffffff:
+            item_code = self.items_received[self.received_items_count].item - albw_base_id
+            item_id = item_code_table[item_code].progress[0].item_id()
+            assert item_id is not None
+            await self.interface.write_u32(self.get_item_ptr, item_id)
+    
+    async def get_null_item(self) -> None:
+        await self.interface.write_u32(self.get_item_ptr, 0xffffffff)
+
+    async def send_message_queue(self) -> None:
+        await self.send_msgs(self.messages)
+        self.messages = []
+
+async def game_watcher(ctx: ALBWClientContext) -> None:
+    global triple_addr
+    global is_3ds
+    while not ctx.exit_event.is_set():
+        try:
+            ctx.invalid = False
+            if triple_addr == "" and is_3ds:
+                ctx.interface_connected = False
+                ctx.interface.disconnect()
+            if not ctx.interface_connected:
+                if triple_addr != "":
+                    if await ctx.interface.connect(triple_addr, TITLE_ID):
+                        if ctx.show_triple_connected_message:
+                            logger.info("3ds connected!")
+                        ctx.initial_connect = True
+                        is_3ds = True
+                        ctx.interface_connected = True
+                        ctx.show_citra_connect_message = False
+                        ctx.show_triple_connected_message = False
+                        ctx.save_validated = False
+                    else:
+                        logger.info("Couldn't connect to 3ds.")
+                        ctx.interface_connected = False
+                        ctx.interface.disconnect()
+                        triple_addr = ""
+                else:
+                    ctx.interface.disconnect()
+                    ctx.show_triple_connected_message = True
+                    is_3ds = False
+                    if ctx.show_citra_connect_message:
+                        logger.info("Connecting to game...")
+                    ctx.show_citra_connect_message = False
+                    ctx.interface_connected = False
+                    if not await ctx.interface.connect("127.0.0.1", TITLE_ID):
+                        await asyncio.sleep(1)
+                    else:
+                        ctx.interface_connected = True
+                        ctx.initial_connect = True
+                        ctx.save_validated = False
+                        logger.info("Emulator connected!")
+            else:
+                if ctx.initial_connect:
+                    await ctx.read_header()
+                if not ctx.invalid:
+                    ctx.initial_connect = False
+                    await ctx.validate_seed()
+                if not ctx.invalid:
+                    if await ctx.is_in_game():
+                        if not ctx.save_validated:
+                            await asyncio.sleep(1)
+                        await ctx.validate_save()
+                        if not ctx.invalid and ctx.server_connected and await ctx.get_pointers():
+                            await ctx.read_data()
+                            if "DeathLink" in ctx.tags:
+                                await ctx.handle_deathlink()
+                            ctx.check_all_locations()
+                            ctx.scout_hints()
+                            await ctx.get_item()
+                            await ctx.send_message_queue()
+                    else:
+                        await ctx.get_null_item()
+        except ConnectionError as e:
+            logger.error(e)
+            ctx.interface.disconnect()
+            ctx.interface_connected = False
+            ctx.last_error = ""
+            ctx.show_citra_connect_message = True
+            ctx.show_triple_connected_message = True
+        except Exception as e:
+            logger.error(e)
+            logger.error(traceback.format_exc())
+            await ctx.disconnect()
+            ctx.interface_connected = False
+            ctx.server_connected = False
+            ctx.last_error = ""
+            ctx.show_citra_connect_message = True
+            ctx.show_triple_connected_message = True
+        await asyncio.sleep(0.25)
+
+def launch(*launch_args) -> None:
+    async def main():
+        parser = get_base_parser()
+        parser.add_argument("patch_file", default="", type=str, nargs="?", help="Path to an Archipelago patch file")
+        args = parser.parse_args(launch_args)
+
+        if args.patch_file != "":
+            create_rom_file(args.patch_file)
+
+        ctx = ALBWClientContext(args.connect, args.password)
+        ctx.server_task = asyncio.create_task(server_loop(ctx), name="ServerLoop")
+
+        if gui_enabled:
+            ctx.run_gui()
+        ctx.run_cli()
+
+        watcher_task = asyncio.create_task(game_watcher(ctx), name="GameWatcher")
+
+        try:
+            await watcher_task
+        except Exception as e:
+            logger.error("".join(traceback.format_exception(e)))
+
+        await ctx.exit_event.wait()
+        await ctx.shutdown()
+
+    if os.getenv("ALBW_DEBUG", False):
+        logger.setLevel(logging.DEBUG)
+    import colorama
+    colorama.init()
+    asyncio.run(main())
+    colorama.deinit()

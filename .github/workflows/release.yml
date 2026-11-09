@@ -1,0 +1,130 @@
+# Builds the 3DS app and the "A Link Between Worlds - 3DS" apworld, and on a version tag publishes
+# both in a release zip laid out like the SD card.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  randomizer-module:
+    name: Randomizer module (${{ matrix.tag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, tag: linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, tag: linux-aarch64 }
+          - { runner: macos-14, tag: darwin-arm64 }
+          - { runner: macos-15-intel, tag: darwin-x86_64 }
+          - { runner: windows-latest, tag: win32-amd64 }
+          - { runner: windows-11-arm, tag: win32-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the module
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          sh apworld/build.sh python
+          ls target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/
+          test -d "target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/${{ matrix.tag }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-${{ matrix.tag }}
+          path: target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/${{ matrix.tag }}/
+          if-no-files-found: error
+
+  apworld:
+    name: Pack the apworld
+    needs: randomizer-module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: module-*
+          path: downloaded
+      - name: Pack every system's module
+        run: |
+          mkdir -p apworld/prebuilt
+          for folder in downloaded/module-*; do
+            mkdir -p "apworld/prebuilt/${folder#downloaded/module-}"
+            cp "$folder"/* "apworld/prebuilt/${folder#downloaded/module-}/"
+          done
+          APWORLD_PACK_ONLY=1 sh apworld/build.sh python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apworld
+          path: |
+            target/apworld/albw_3ds.apworld
+            target/apworld/version.txt
+          if-no-files-found: error
+
+  app:
+    name: 3DS app
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and cargo-3ds
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+          . "$HOME/.cargo/env"
+          rustup toolchain install
+          cargo install --locked cargo-3ds
+      - name: Build
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="/opt/devkitpro/tools/bin:/opt/devkitpro/devkitARM/bin:$PATH"
+          cargo 3ds build --release -p app-3ds
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: target/armv6k-nintendo-3ds/release/albw-rando.3dsx
+          if-no-files-found: error
+
+  release:
+    name: Release zip
+    needs: [apworld, app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: built
+      - name: Lay out the SD card
+        run: |
+          mkdir -p sd/3ds/albw-rando/apworld sd/3ds/albw-rando/ap
+          cp built/app/albw-rando.3dsx sd/3ds/
+          cp built/apworld/albw_3ds.apworld built/apworld/version.txt sd/3ds/albw-rando/apworld/
+          touch sd/3ds/albw-rando/ap/.keep
+          (cd sd && zip -r ../albw-rando-sd.zip .)
+          cp built/apworld/albw_3ds.apworld .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            albw-rando-sd.zip
+            albw_3ds.apworld
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            albw-rando-sd.zip
+            albw_3ds.apworld
+          body: |
+            Extract albw-rando-sd.zip to the root of your SD card. It adds the app and the
+            /3ds/albw-rando folder with the apworld that the albw.local page offers to hosts.
+
+            Hosts: put albw_3ds.apworld in Archipelago/custom_worlds/. The game is
+            "A Link Between Worlds - 3DS", based on randomsalience's albw-archipelago.

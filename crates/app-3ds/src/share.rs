@@ -1,0 +1,350 @@
+//! The albw.local page: a small web server and mDNS responder that run while the sharing page is open.
+//!
+//! Everything is non-blocking and polled once a frame from the main loop, because 3DS threads only
+//! switch when one waits. The protocol details live in `ui_core::net`.
+
+use std::fs::{self, File};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::path::Path;
+
+use ctru::services::soc::Soc;
+use ui_core::net;
+
+use crate::job;
+
+/// The apworld the page offers, kept beside the app's other files.
+pub const APWORLD: &str = "sdmc:/3ds/albw-rando/apworld/albw_3ds.apworld";
+/// The apworld's version, written next to it.
+pub const APWORLD_VERSION: &str = "sdmc:/3ds/albw-rando/apworld/version.txt";
+
+const PAGE: &str = include_str!("share_page.html");
+const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MDNS_PORT: u16 = 5353;
+/// Patch files are tens of kilobytes. Anything this large is not one.
+const MOST_UPLOAD: usize = 8 * 1024 * 1024;
+const CHUNK: usize = 16 * 1024;
+/// Announce the name again now and then, about every 30 seconds at 60 frames a second.
+const ANNOUNCE_EVERY: u32 = 1800;
+
+/// What the page serves, refreshed by the app.
+pub struct Content {
+    pub player: String,
+    pub options_file: String,
+}
+
+/// Something the menu should hear about.
+pub enum Event {
+    /// A patch arrived and was saved under this name.
+    Saved(String),
+}
+
+enum State {
+    /// Reading the request, and its body once the headers say how long it is.
+    Reading(Vec<u8>),
+    /// Sending a reply, then perhaps a file after it, then closing.
+    Writing { data: Vec<u8>, sent: usize, file: Option<File> },
+    /// An open WebSocket that gets status messages.
+    Socket { out: Vec<u8> },
+}
+
+struct Connection {
+    stream: TcpStream,
+    state: State,
+    idle: u32,
+}
+
+pub struct Share {
+    // Dropping the service closes every socket, so it goes last.
+    listener: TcpListener,
+    mdns: Option<UdpSocket>,
+    connections: Vec<Connection>,
+    ip: Ipv4Addr,
+    frames: u32,
+    last_status: String,
+    _soc: Soc,
+}
+
+fn apworld_version() -> Option<String> {
+    if !Path::new(APWORLD).exists() {
+        return None;
+    }
+    Some(fs::read_to_string(APWORLD_VERSION).map(|text| text.trim().to_owned()).unwrap_or_else(|_| "unknown".to_owned()))
+}
+
+fn status_json(content: &Content) -> String {
+    serde_json::json!({ "player": content.player, "apworld": apworld_version() }).to_string()
+}
+
+impl Share {
+    /// Starts sharing. Fails with a message the menu can show.
+    pub fn start() -> Result<Self, String> {
+        let soc = Soc::new().map_err(|err| format!("The network could not start: {err}"))?;
+        let ip = soc.host_address();
+        if ip.is_unspecified() {
+            return Err("The 3DS is not on Wi-Fi. Turn on wireless and connect to your network, then try again.".to_owned());
+        }
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 80))
+            .map_err(|err| format!("The page could not start on port 80: {err}"))?;
+        listener.set_nonblocking(true).map_err(|err| format!("The page could not start: {err}"))?;
+        // The page still works by IP address if mDNS cannot start.
+        let mdns = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT))
+            .and_then(|socket| {
+                socket.join_multicast_v4(&MDNS_GROUP, &ip)?;
+                socket.set_nonblocking(true)?;
+                Ok(socket)
+            })
+            .map_err(|err| job::log(&format!("mDNS could not start: {err}")))
+            .ok();
+        job::log(&format!("Sharing at {ip}, mDNS {}", if mdns.is_some() { "on" } else { "off" }));
+        Ok(Self { listener, mdns, connections: Vec::new(), ip, frames: 0, last_status: String::new(), _soc: soc })
+    }
+
+    /// The lines for the sharing page.
+    pub fn address_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.mdns.is_some() {
+            lines.push(format!("http://{}", net::HOST_NAME));
+            lines.push(format!("or http://{}", self.ip));
+        } else {
+            lines.push(format!("http://{}", self.ip));
+        }
+        lines
+    }
+
+    fn announce(&self) {
+        if let Some(socket) = &self.mdns {
+            let packet = net::mdns_announcement(net::HOST_NAME, self.ip.octets());
+            let _ = socket.send_to(&packet, SocketAddrV4::new(MDNS_GROUP, MDNS_PORT));
+        }
+    }
+
+    /// Does one frame of work. Call it every frame while the sharing page shows.
+    pub fn poll(&mut self, content: &Content) -> Vec<Event> {
+        let mut events = Vec::new();
+        if self.frames % ANNOUNCE_EVERY == 0 {
+            self.announce();
+        }
+        self.frames = self.frames.wrapping_add(1);
+
+        if let Some(socket) = &self.mdns {
+            let mut packet = [0u8; 1500];
+            while let Ok((len, from)) = socket.recv_from(&mut packet) {
+                if let Some(answer) = net::mdns_answer(&packet[..len], net::HOST_NAME, self.ip.octets()) {
+                    // A query from port 5353 wants the answer sent to the group.
+                    let to = if from.port() == MDNS_PORT { std::net::SocketAddr::V4(SocketAddrV4::new(MDNS_GROUP, MDNS_PORT)) } else { from };
+                    let _ = socket.send_to(&answer, to);
+                }
+            }
+        }
+
+        while let Ok((stream, _)) = self.listener.accept() {
+            if stream.set_nonblocking(true).is_ok() && self.connections.len() < 8 {
+                self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0 });
+            }
+        }
+
+        let status = status_json(content);
+        let status_changed = status != self.last_status;
+        if status_changed {
+            self.last_status = status.clone();
+        }
+
+        for connection in &mut self.connections {
+            connection.idle += 1;
+            if let State::Socket { out } = &mut connection.state {
+                if status_changed {
+                    out.extend(net::websocket_text(&status));
+                }
+            }
+            step(connection, content, &status, &mut events);
+        }
+        // Drop finished connections, and any quiet for about 20 seconds.
+        self.connections.retain(|connection| connection.idle < 1200 || matches!(connection.state, State::Socket { .. }));
+        self.connections.retain(|connection| !matches!(&connection.state, State::Writing { data, sent, file } if *sent >= data.len() && file.is_none()));
+        events
+    }
+}
+
+/// Moves one connection along as far as it can go without waiting.
+fn step(connection: &mut Connection, content: &Content, status: &str, events: &mut Vec<Event>) {
+    loop {
+        match &mut connection.state {
+            State::Reading(buffer) => {
+                let mut chunk = [0u8; 4096];
+                match connection.stream.read(&mut chunk) {
+                    Ok(0) => {
+                        connection.state = finished();
+                        return;
+                    }
+                    Ok(len) => {
+                        connection.idle = 0;
+                        buffer.extend_from_slice(&chunk[..len]);
+                    }
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => {
+                        connection.state = finished();
+                        return;
+                    }
+                }
+                let request = match net::parse_request(buffer) {
+                    Ok(Some(request)) => request,
+                    Ok(None) => return,
+                    Err(()) => {
+                        connection.state = finished();
+                        return;
+                    }
+                };
+                if request.content_length > MOST_UPLOAD {
+                    connection.state = reply(net::response("413 Payload Too Large", "text/plain", b"That file is too large to be a patch."));
+                    continue;
+                }
+                if buffer.len() < request.body_start + request.content_length {
+                    return;
+                }
+                let body = buffer[request.body_start..request.body_start + request.content_length].to_vec();
+                connection.state = route(&request, &body, content, status, events);
+            }
+            State::Writing { data, sent, file } => {
+                if *sent >= data.len() {
+                    match file {
+                        Some(source) => {
+                            let mut chunk = vec![0u8; CHUNK];
+                            match source.read(&mut chunk) {
+                                Ok(0) | Err(_) => {
+                                    *file = None;
+                                    let _ = connection.stream.flush();
+                                    return;
+                                }
+                                Ok(len) => {
+                                    chunk.truncate(len);
+                                    *data = chunk;
+                                    *sent = 0;
+                                }
+                            }
+                        }
+                        None => return,
+                    }
+                }
+                match connection.stream.write(&data[*sent..]) {
+                    Ok(len) => {
+                        connection.idle = 0;
+                        *sent += len;
+                    }
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => return,
+                    Err(_) => {
+                        connection.state = finished();
+                        return;
+                    }
+                }
+            }
+            State::Socket { out } => {
+                connection.idle = 0;
+                let mut chunk = [0u8; 512];
+                match connection.stream.read(&mut chunk) {
+                    Ok(0) => {
+                        connection.state = finished();
+                        return;
+                    }
+                    Ok(len) if net::websocket_closed(&chunk[..len]) => {
+                        connection.state = finished();
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => {
+                        connection.state = finished();
+                        return;
+                    }
+                }
+                if !out.is_empty() {
+                    match connection.stream.write(out) {
+                        Ok(len) => {
+                            out.drain(..len);
+                        }
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                        Err(_) => connection.state = finished(),
+                    }
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn reply(data: Vec<u8>) -> State {
+    State::Writing { data, sent: 0, file: None }
+}
+
+fn finished() -> State {
+    State::Writing { data: Vec::new(), sent: 0, file: None }
+}
+
+fn text(status: &str, message: &str) -> State {
+    reply(net::response(status, "text/plain; charset=utf-8", message.as_bytes()))
+}
+
+fn route(request: &net::Request, body: &[u8], content: &Content, status: &str, events: &mut Vec<Event>) -> State {
+    let path = request.path.split('?').next().unwrap_or("");
+    match (request.method.as_str(), path) {
+        ("GET", "/ws") if request.wants_websocket() => match net::websocket_accept(request) {
+            Some(mut out) => {
+                out.extend(net::websocket_text(status));
+                State::Socket { out }
+            }
+            None => text("400 Bad Request", "Bad WebSocket request."),
+        },
+        ("GET", "/") | ("GET", "/index.html") => reply(net::response("200 OK", "text/html; charset=utf-8", PAGE.as_bytes())),
+        ("GET", "/status") => reply(net::response("200 OK", "application/json", status.as_bytes())),
+        ("GET", "/options.yaml") => {
+            let name = format!("attachment; filename=\"{}.yaml\"", content.player.replace(['"', '\\'], ""));
+            let mut data = net::response_head("200 OK", "application/x-yaml; charset=utf-8", content.options_file.len() as u64, &[("Content-Disposition", &name)]);
+            data.extend_from_slice(content.options_file.as_bytes());
+            reply(data)
+        }
+        ("GET", "/albw_3ds.apworld") => match File::open(APWORLD).and_then(|file| Ok((file.metadata()?.len(), file))) {
+            Ok((length, file)) => State::Writing {
+                data: net::response_head(
+                    "200 OK",
+                    "application/octet-stream",
+                    length,
+                    &[("Content-Disposition", "attachment; filename=\"albw_3ds.apworld\"")],
+                ),
+                sent: 0,
+                file: Some(file),
+            },
+            Err(_) => text("404 Not Found", "The apworld is not on this 3DS yet."),
+        },
+        ("POST", "/patch") => {
+            let name = request.header("X-File-Name").map(net::percent_decode).and_then(|name| net::safe_file_name(&name));
+            let Some(name) = name else {
+                return text("400 Bad Request", "The file needs a name.");
+            };
+            if !name.to_ascii_lowercase().ends_with(&format!(".{}", ap_patch::EXTENSION)) {
+                return text("400 Bad Request", "Only .apalbw3ds patch files can be sent.");
+            }
+            // Checked before saving, so a wrong file never reaches the list.
+            if let Err(problem) = ap_patch::read(body) {
+                return text("400 Bad Request", &problem);
+            }
+            match save_patch(&name, body) {
+                Ok(()) => {
+                    job::log(&format!("Received patch {name}, {} bytes", body.len()));
+                    events.push(Event::Saved(name.clone()));
+                    text("200 OK", &format!("Saved {name} on the 3DS. Open Patch Files there to apply it."))
+                }
+                Err(err) => text("500 Internal Server Error", &format!("The 3DS could not save the file: {err}")),
+            }
+        }
+        _ => text("404 Not Found", "Nothing here."),
+    }
+}
+
+fn save_patch(name: &str, body: &[u8]) -> std::io::Result<()> {
+    fs::create_dir_all(job::AP_DIR)?;
+    let target = Path::new(job::AP_DIR).join(name);
+    let temporary = target.with_extension("part");
+    fs::write(&temporary, body)?;
+    let _ = fs::remove_file(&target);
+    fs::rename(&temporary, &target)
+}

@@ -5,14 +5,14 @@ use simplelog::{LevelFilter, SimpleLogger, CombinedLogger, WriteLogger, SharedLo
 #[pyfunction]
 pub fn logging_on() {
     let mut loggers: Vec<Box<dyn SharedLogger>> = vec![SimpleLogger::new(LevelFilter::Info, Default::default())];
-    if let Ok(logfile) = File::create(Path::new("logs").join("albwrandomizer.log")) {
+    if let Ok(logfile) = File::create(Path::new("logs").join("albw3dsrandomizer.log")) {
         loggers.push(WriteLogger::new(LevelFilter::Info, Default::default(), logfile));
     }
     CombinedLogger::init(loggers).expect("Could not initialize logger.");
 }
 
 #[pymodule]
-mod albwrandomizer {
+mod albw3dsrandomizer {
     #[pymodule_export]
     use modinfo::settings::{
         Cracks, Cracksanity, HintGhosts, Keysy, LogicMode, NiceItems,

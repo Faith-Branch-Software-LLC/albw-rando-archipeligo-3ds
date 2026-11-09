@@ -132,6 +132,40 @@ impl Rules {
         }
     }
 
+    /// The option's choices and the one picked, for drawing as pills. Toggles are Off and On.
+    pub fn pills(&self, option: &OptionDef) -> crate::menu::Pills {
+        use crate::menu::Pills;
+        let value = self.values.get(option.key);
+        match option.kind {
+            Kind::Toggle => Pills::Choices {
+                names: vec!["Off".to_owned(), "On".to_owned()],
+                selected: usize::from(value.and_then(Value::as_bool).unwrap_or(false)),
+            },
+            Kind::Choice(choices) => {
+                let stored = value.and_then(Value::as_str).unwrap_or("");
+                Pills::Choices {
+                    names: choices.iter().map(|(_, label)| (*label).to_owned()).collect(),
+                    selected: choices.iter().position(|(key, _)| *key == stored).unwrap_or(0),
+                }
+            }
+            Kind::Number { min, max, .. } => Pills::Number { value: value.and_then(Value::as_i64).unwrap_or(min), min, max },
+        }
+    }
+
+    /// Picks a toggle's or choice's value by its place in `pills`. Numbers are left alone.
+    pub fn select(&mut self, option: &OptionDef, index: usize) {
+        let next = match option.kind {
+            Kind::Toggle => json!(index == 1),
+            Kind::Choice(choices) => match choices.get(index) {
+                Some((key, _)) => json!(key),
+                None => return,
+            },
+            Kind::Number { .. } => return,
+        };
+        self.values.insert(option.key.to_owned(), next);
+        self.resolve_conflicts(option.key);
+    }
+
     /// Moves an option to its next (`delta` 1) or previous (`delta` -1) value, wrapping at the ends.
     pub fn step(&mut self, option: &OptionDef, delta: i32) {
         let current = self.values.get(option.key);

@@ -3,6 +3,15 @@ use rand::{rngs::StdRng, Rng};
 use std::collections::BTreeMap;
 use std::hash::Hash;
 
+/// A random index below `len`, drawn the same way on 32-bit and 64-bit builds.
+///
+/// `gen_range` on `usize` samples by pointer width, so a 3DS and a PC would make different seeds
+/// from the same number. Archipelago patches made on a PC are rebuilt on the 3DS, so both must
+/// agree. Drawing through `u64` gives what a 64-bit build always gave.
+pub(crate) fn index<R: Rng + ?Sized>(rng: &mut R, len: usize) -> usize {
+    rng.gen_range(0..len as u64) as usize
+}
+
 /// Shuffles elements of a Vec
 pub(crate) fn shuffle<K>(rng: &mut StdRng, mut vec: Vec<K>) -> Vec<K> {
     if vec.len() < 2 {
@@ -12,7 +21,7 @@ pub(crate) fn shuffle<K>(rng: &mut StdRng, mut vec: Vec<K>) -> Vec<K> {
     let mut shuffled: Vec<K> = Vec::new();
 
     while !vec.is_empty() {
-        shuffled.push(vec.remove(rng.gen_range(0..vec.len())));
+        shuffled.push(vec.remove(index(rng, vec.len())));
     }
 
     shuffled

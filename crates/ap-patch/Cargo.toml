@@ -1,0 +1,15 @@
+[package]
+name = "ap-patch"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Rebuilds an A Link Between Worlds - 3DS Archipelago patch into a seed the patcher can write"
+
+[dependencies]
+miniz_oxide = "0.8"
+modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
+randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+rom = { path = "../../vendor/z17-randomizer/rom" }

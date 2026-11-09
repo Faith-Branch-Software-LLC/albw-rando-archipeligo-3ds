@@ -19,6 +19,10 @@ pub const RED: u32 = rgba(0xE0, 0x5A, 0x5A, 255);
 pub const WHITE: u32 = rgba(0xF4, 0xF6, 0xFB, 255);
 pub const MUTED: u32 = rgba(0x98, 0xA6, 0xC2, 255);
 pub const DIM: u32 = rgba(0x4E, 0x5C, 0x7A, 255);
+/// Unpicked pills, and the well behind a number.
+pub const WELL: u32 = rgba(0x18, 0x22, 0x3A, 255);
+/// Text on a gold pill.
+pub const INK: u32 = rgba(0x1A, 0x1F, 0x2E, 255);
 const SHINE: u32 = rgba(0xFF, 0xFF, 0xFF, 70);
 
 pub const LEFT: i32 = 0;

@@ -10,11 +10,10 @@ use crate::world::{check, crack_left, crack_right, edge, fast_travel_hyrule, gho
 use crate::LocationInfo;
 use crate::{regions, CrackMap};
 use game::ghosts::HintGhost;
-use std::collections::HashMap;
 
 /// Hyrule
-pub(crate) fn graph(crack_map: &CrackMap) -> HashMap<Location, LocationNode> {
-    HashMap::from([
+pub(crate) fn graph(crack_map: &CrackMap) -> crate::DashMap<Location, LocationNode> {
+    crate::DashMap::from_iter([
         // Starting Node
         (
             RavioShop,

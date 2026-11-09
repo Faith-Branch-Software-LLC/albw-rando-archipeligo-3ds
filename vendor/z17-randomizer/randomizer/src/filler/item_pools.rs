@@ -10,7 +10,7 @@ use modinfo::settings::logic::LogicMode;
 use modinfo::settings::nice_items::NiceItems;
 use modinfo::settings::super_items::SuperItems;
 use modinfo::Settings;
-use rand::{rngs::StdRng, Rng};
+use rand::rngs::StdRng;
 use std::cmp::Ordering;
 use std::iter::repeat;
 
@@ -140,7 +140,7 @@ fn shuffle_order_progression_pools(rng: &mut StdRng, pools: Vec<Vec<Item>>) -> P
 /// - If [`LetterInABottle`] is chosen, it must be turned in at the Milk Bar to get the [`PremiumMilk`].
 /// - If [`PremiumMilk`] is chosen, the Milk Bar is irrelevant and there simply is no [`LetterInABottle`] in the seed.
 fn choose_trade_item(rng: &mut StdRng) -> Item {
-    [LetterInABottle, PremiumMilk][rng.gen_range(0..2)]
+    [LetterInABottle, PremiumMilk][crate::filler::util::index(rng, 2)]
 }
 
 fn get_base_progression_pool() -> Vec<Item> {
@@ -329,7 +329,7 @@ fn get_base_junk_pool(rng: &mut StdRng) -> Vec<Item> {
 
 fn add_random_junk_item(rng: &mut StdRng, junk_pool: &mut Vec<Item>) {
     const POSSIBLE_EXTRA_ITEMS: [Item; 3] = [MonsterTail, MonsterHorn, MonsterGuts];
-    junk_pool.push(POSSIBLE_EXTRA_ITEMS[rng.gen_range(0..POSSIBLE_EXTRA_ITEMS.len())]);
+    junk_pool.push(POSSIBLE_EXTRA_ITEMS[crate::filler::util::index(rng, POSSIBLE_EXTRA_ITEMS.len())]);
 }
 
 pub fn get_maiamai_pool() -> Vec<Item> {

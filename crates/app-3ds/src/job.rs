@@ -27,6 +27,10 @@ const EXHEADER: &str = "sdmc:/3ds/albw-rando/exheader.bin";
 const BUILD_DIR: &str = "sdmc:/3ds/albw-rando/build";
 const SPILL_DIR: &str = "sdmc:/3ds/albw-rando/tmp";
 const SEED_LIBRARY: &str = "sdmc:/3ds/albw-rando/seeds";
+/// One `NNNN-seed-<seed>.json` per seed made. The number grows, so names sort oldest first.
+pub const SPOILER_DIR: &str = "sdmc:/3ds/albw-rando/spoilers";
+/// Archipelago patch files from the host, `.apalbw3ds`.
+pub const AP_DIR: &str = "sdmc:/3ds/albw-rando/ap";
 const MODMOON_ROOT: &str = "sdmc:/3ds/ModMoon";
 const MODMOON_SETTINGS: &str = "sdmc:/3ds/ModMoon/settings.txt";
 const LUMA_TITLES: &str = "sdmc:/luma/titles";
@@ -47,15 +51,85 @@ pub struct Request {
     /// Folder names under `MODEL_DIR` and `VOICE_DIR`.
     pub model: Option<String>,
     pub voice: Option<String>,
+    /// An Archipelago patch file under `AP_DIR` and the look-only choices. When given, the game is
+    /// rebuilt from the patch, and `seed`, `settings`, and `preset_name` are not used.
+    pub archipelago: Option<(String, ap_patch::Looks)>,
+}
+
+/// Lists the Archipelago patch files, newest first, creating the folder so people can find it.
+pub fn list_patches() -> Vec<String> {
+    let _ = fs::create_dir_all(AP_DIR);
+    let Ok(entries) = fs::read_dir(AP_DIR) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_owned();
+            let wanted = Path::new(&name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case(ap_patch::EXTENSION));
+            let time = entry.metadata().and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            wanted.then_some((time, name))
+        })
+        .collect();
+    found.sort();
+    found.reverse();
+    found.into_iter().map(|(_, name)| name).collect()
+}
+
+fn read_patch_file(name: &str) -> Result<ap_patch::Patch, String> {
+    let bytes = fs::read(Path::new(AP_DIR).join(name)).map_err(|err| format!("Can't read {name}: {err}"))?;
+    ap_patch::read(&bytes)
+}
+
+/// Reads a patch file for the confirm page.
+pub fn read_patch(name: &str) -> Result<ui_core::menu::PatchSummary, String> {
+    let patch = read_patch_file(name)?;
+    Ok(ui_core::menu::PatchSummary {
+        file: name.to_owned(),
+        player: patch.player_name.clone(),
+        seed: patch.seed,
+        version: patch.version.clone(),
+        lines: ap_patch::describe(&patch),
+    })
 }
 
 /// Finds a mod's `romfs` folder. Archives often wrap it in one more folder, such as the title ID.
-fn romfs_of(folder: &Path) -> Option<PathBuf> {
+pub fn romfs_of(folder: &Path) -> Option<PathBuf> {
     let direct = folder.join("romfs");
     if direct.is_dir() {
         return Some(direct);
     }
     fs::read_dir(folder).ok()?.flatten().map(|entry| entry.path().join("romfs")).find(|path| path.is_dir())
+}
+
+/// The saved spoiler logs' names without the extension, newest first.
+pub fn list_spoilers() -> Vec<String> {
+    let Ok(entries) = fs::read_dir(SPOILER_DIR) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".json").map(str::to_owned))
+        .collect();
+    names.sort();
+    names.reverse();
+    names
+}
+
+/// Reads a saved spoiler log for the menu.
+pub fn read_spoiler(name: &str) -> Result<ui_core::spoiler::Spoiler, String> {
+    let text = fs::read_to_string(format!("{SPOILER_DIR}/{name}.json")).map_err(|err| format!("Could not read the log: {err}"))?;
+    ui_core::spoiler::parse(&text)
+}
+
+/// Writes the spoiler log in the randomizer's own format, so other tools can read it too.
+fn save_spoiler(seed_info: &randomizer::SeedInfo) -> Result<String, String> {
+    fs::create_dir_all(SPOILER_DIR).map_err(|err| format!("Could not create {SPOILER_DIR}: {err}"))?;
+    let next = list_spoilers().iter().filter_map(|name| name.split('-').next()?.parse::<u32>().ok()).max().map_or(1, |n| n + 1);
+    let path = format!("{SPOILER_DIR}/{next:04}-seed-{}.json", seed_info.seed);
+    let text = serde_json::to_string_pretty(seed_info).map_err(|err| format!("Could not write the spoiler log: {err}"))?;
+    fs::write(&path, text).map_err(|err| format!("Could not save {path}: {err}"))?;
+    Ok(path.trim_start_matches("sdmc:").to_owned())
 }
 
 /// Lists the usable mods in a folder, creating the folder so people can find where they go.
@@ -203,7 +277,12 @@ pub fn check_game() -> GameCheck {
                         details,
                     };
                 }
-                Err(_) => details.push("Readable, but there is no exheader.bin.".to_owned()),
+                Err(_) => {
+                    details.push("Readable, but there is no exheader.bin.".to_owned());
+                    // SAFETY: `name` outlives the call. This undoes the mount above, so the next
+                    // place can use the same name.
+                    let _ = unsafe { ctru_sys::romfsUnmount(name.as_ptr()) };
+                }
             }
         }
         if present {
@@ -230,7 +309,7 @@ pub fn game_archives(check: GameCheck, names: &[&str]) -> Result<Vec<Vec<u8>>, S
             let archives = names.iter().map(|name| fs::read(format!("{MOUNT}:/{}", archive(name))).map_err(|err| err.to_string())).collect();
             let mount = CString::new(MOUNT).expect("name has no zero byte");
             // SAFETY: `mount` outlives the call. This undoes the mount that `check_game` made.
-            unsafe { ctru_sys::romfsUnmount(mount.as_ptr()) };
+            let _ = unsafe { ctru_sys::romfsUnmount(mount.as_ptr()) };
             archives
         }
         Some((_, Source::Image)) => {
@@ -241,12 +320,47 @@ pub fn game_archives(check: GameCheck, names: &[&str]) -> Result<Vec<Vec<u8>>, S
     }
 }
 
+/// The game's sound archive, which holds the player's voice.
+const SOUND_ARCHIVE: &str = "World/Sound/Jack.bcsar";
+
+/// Reads part of a file in the backup copy.
+struct RomFile<'a>(&'a rom::Rom, &'static str);
+
+impl ui_core::csar::ReadAt for RomFile<'_> {
+    fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        self.0.read_range(self.1, offset, len).map_err(|err| err.to_string())
+    }
+}
+
+/// Reads voice clips from the game's own sound archive, a piece at a time.
+pub fn game_voice_clips(names: &[&str]) -> Result<(Vec<ui_core::csar::Clip>, Vec<String>), String> {
+    let check = check_game();
+    let clips = match &check.source {
+        Some((_, Source::Mounted(_))) => fs::File::open(format!("{MOUNT}:/{SOUND_ARCHIVE}"))
+            .map_err(|err| err.to_string())
+            .and_then(|file| ui_core::csar::read_clips(&mut ui_core::csar::Seekable(file), names)),
+        Some((_, Source::Image)) => rom::Rom::load(IMAGE)
+            .map_err(|err| err.to_string())
+            .and_then(|game| ui_core::csar::read_clips(&mut RomFile(&game, SOUND_ARCHIVE), names)),
+        None => Err(check.summary.clone()),
+    };
+    finish_check(check);
+    clips
+}
+
+/// Reads voice clips from a voice pack's sound archive.
+pub fn mod_voice_clips(name: &str, names: &[&str]) -> Result<(Vec<ui_core::csar::Clip>, Vec<String>), String> {
+    let romfs = romfs_of(&Path::new(VOICE_DIR).join(name)).ok_or("The voice pack has no romfs folder.")?;
+    let file = fs::File::open(romfs.join(SOUND_ARCHIVE)).map_err(|_| "The voice pack has no Jack.bcsar.".to_owned())?;
+    ui_core::csar::read_clips(&mut ui_core::csar::Seekable(std::io::BufReader::new(file)), names)
+}
+
 /// Lets the next check mount the game again.
 pub fn finish_check(check: GameCheck) {
     if matches!(check.source, Some((_, Source::Mounted(_)))) {
         let mount = CString::new(MOUNT).expect("name has no zero byte");
         // SAFETY: `mount` outlives the call. This undoes the mount that `check_game` made.
-        unsafe { ctru_sys::romfsUnmount(mount.as_ptr()) };
+        let _ = unsafe { ctru_sys::romfsUnmount(mount.as_ptr()) };
     }
 }
 
@@ -313,14 +427,16 @@ fn random_seed() -> u32 {
 }
 
 fn run(request: Request) -> Result<(), String> {
-    let Request { mut seed, seed_was_typed, settings, preset_name, new_memory, model, voice } = request;
+    let Request { mut seed, seed_was_typed, settings, mut preset_name, new_memory, model, voice, archipelago } = request;
     log(&format!("App version {}", env!("CARGO_PKG_VERSION")));
     log(&format!("Console memory: {}", if new_memory { "New 3DS" } else { "Old 3DS" }));
-    log(&format!("Seed {seed}, typed by the player: {seed_was_typed}"));
-    log(&format!("Preset: {preset_name}"));
-    match serde_json::to_string(&settings) {
-        Ok(text) => log(&format!("Settings: {text}")),
-        Err(err) => log(&format!("Settings could not be written: {err}")),
+    if archipelago.is_none() {
+        log(&format!("Seed {seed}, typed by the player: {seed_was_typed}"));
+        log(&format!("Preset: {preset_name}"));
+        match serde_json::to_string(&settings) {
+            Ok(text) => log(&format!("Settings: {text}")),
+            Err(err) => log(&format!("Settings could not be written: {err}")),
+        }
     }
     log(&format!("Model: {}", model.as_deref().unwrap_or("Original")));
     log(&format!("Voice: {}", voice.as_deref().unwrap_or("Original")));
@@ -343,7 +459,22 @@ fn run(request: Request) -> Result<(), String> {
     let source = find_game()?;
 
     let mut attempts = 0;
-    let seed_info = loop {
+    let seed_info = if let Some((file, looks)) = &archipelago {
+        log(&format!("Archipelago patch: {file}, looks {looks:?}"));
+        progress::report("Reading the patch", 0, 0);
+        let patch = read_patch_file(file)?;
+        log(&format!("Patch version {}, player {}, seed {}", patch.version, patch.player_name, patch.seed));
+        match serde_json::to_string(&patch.options) {
+            Ok(text) => log(&format!("Patch options: {text}")),
+            Err(err) => log(&format!("Patch options could not be written: {err}")),
+        }
+        progress::report("Rebuilding the multiworld layout", 0, 0);
+        let info = ap_patch::build(&patch, *looks)?;
+        seed = patch.seed;
+        preset_name = format!("Archipelago: {}", patch.player_name);
+        info
+    } else {
+        loop {
         attempts += 1;
         log(&format!("Fill: seed {seed}, attempt {attempts}"));
         match randomizer::build_seed(seed, settings.clone()) {
@@ -360,6 +491,7 @@ fn run(request: Request) -> Result<(), String> {
                 seed = random_seed();
             }
         }
+    }
     };
     log(&format!("Fill finished, peak {:.1} MB", memory::take_peak_mb()));
 
@@ -408,6 +540,14 @@ fn run(request: Request) -> Result<(), String> {
     let path = save(seed, &hash, &preset_name, &mods)?;
     log(&format!("Saved to {path}, hash {hash}"));
     let mut lines = vec![format!("Saved to {path}"), format!("Seed {seed}   Hash {hash}")];
+    // The seed is already saved, so a log that cannot be written is only reported.
+    match save_spoiler(&seed_info) {
+        Ok(spoiler) => log(&format!("Spoiler log saved to {spoiler}")),
+        Err(err) => {
+            log(&err);
+            lines.push("The spoiler log could not be saved. See last-run.log.".to_owned());
+        }
+    }
     if !mods_ok {
         lines.push("Some mod files were left out. See last-run.log.".to_owned());
     }

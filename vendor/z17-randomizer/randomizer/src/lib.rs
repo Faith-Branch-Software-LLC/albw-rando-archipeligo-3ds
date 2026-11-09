@@ -29,7 +29,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use regions::Subregion;
 use rom::Rom;
 use serde::{ser::SerializeMap, Deserialize, Serialize, Serializer};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasherDefault;
 use std::{
     error::Error as StdError,
@@ -576,7 +576,7 @@ impl SeedHash {
 
     pub fn new(seed: u32, settings: &Settings) -> Self {
         // Calculate underlying Hash
-        let mut hasher = XxHash64::default();
+        let mut hasher = StableHasher::default();
         (seed, settings, VERSION).hash(&mut hasher);
         let mut hash = hasher.finish() % 100_000;
 
@@ -658,13 +658,39 @@ fn validate_settings(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// XxHash64 that hashes `usize` and `isize` as 64-bit values on every build.
+///
+/// Lengths and enum discriminants hash through `usize` and `isize`, so plain XxHash64 gives a
+/// 32-bit 3DS different hashes than a 64-bit PC. That changed the seed hash and the order of
+/// `DashMap`s. Widening them keeps what 64-bit builds always made.
+#[derive(Default, Clone)]
+pub struct StableHasher(XxHash64);
+
+impl std::hash::Hasher for StableHasher {
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes)
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.0.write_u64(value as u64)
+    }
+
+    fn write_isize(&mut self, value: isize) {
+        self.0.write_i64(value as i64)
+    }
+}
+
 /// "Deterministic `HashMap`" that uses a hashing algorithm not based on any random number generation, unlike the Rust
 /// default which is non-deterministic for security reasons not relevant for our purposes.
-pub type DashMap<K, V> = HashMap<K, V, BuildHasherDefault<XxHash64>>;
+pub type DashMap<K, V> = indexmap::IndexMap<K, V, BuildHasherDefault<StableHasher>>;
 
 /// "Deterministic `HashSet`" that uses a hashing algorithm not based on any random number generation, unlike the Rust
 /// default which is non-deterministic for security reasons not relevant for our purposes.
-pub type DashSet<T> = HashSet<T, BuildHasherDefault<XxHash64>>;
+pub type DashSet<T> = indexmap::IndexSet<T, BuildHasherDefault<StableHasher>>;
 
 /// Map of all checks (as Strings) to their held item
 pub type CheckMap = DashMap<String, Option<Randomizable>>;

@@ -7,7 +7,7 @@ use std::fs;
 
 use ui_core::{flim, icons::SOURCES, sarc};
 
-use crate::{draw, job};
+use crate::{draw, job, model_view};
 
 const CACHE: &str = "sdmc:/3ds/albw-rando/cache/icons";
 
@@ -26,11 +26,16 @@ fn cache_path(name: &str) -> String {
 
 /// Copies any icons not yet on the SD card out of the game. Returns a note for the log.
 fn fill_cache(check: job::GameCheck) -> String {
-    let needed: Vec<&str> = SOURCES
+    let mut needed: Vec<&str> = SOURCES
         .iter()
         .filter(|(_, names)| names.iter().any(|name| !std::path::Path::new(&cache_path(name)).exists()))
         .map(|(archive, _)| *archive)
         .collect();
+    // The model preview also needs the game's own model, which this read can fetch at the same time.
+    let wants_model = model_view::needs_vanilla();
+    if wants_model {
+        needed.push(model_view::ARCHIVE);
+    }
     if needed.is_empty() {
         job::finish_check(check);
         return "Icons were already on the SD card.".to_owned();
@@ -45,7 +50,12 @@ fn fill_cache(check: job::GameCheck) -> String {
     };
     let mut copied = 0;
     let mut missing = Vec::new();
+    let mut model_note = String::new();
     for (archive, data) in needed.iter().zip(&archives) {
+        if wants_model && *archive == model_view::ARCHIVE {
+            model_note = format!(" {}", model_view::cache_vanilla(data));
+            continue;
+        }
         let names = SOURCES.iter().find(|(name, _)| name == archive).map_or(&[][..], |(_, names)| *names);
         for name in names {
             match sarc::find(data, &format!("timg/{name}.bflim")) {
@@ -54,7 +64,7 @@ fn fill_cache(check: job::GameCheck) -> String {
             }
         }
     }
-    format!("Copied {copied} icons from the game. Missing: {missing:?}")
+    format!("Copied {copied} icons from the game. Missing: {missing:?}{model_note}")
 }
 
 /// Loads the icons into GPU memory, reading the game only if the SD card lacks them.

@@ -233,6 +233,30 @@ impl Rom {
         *source = RomSource::Overlaid(folders, Box::new(game));
     }
 
+    /// Reads up to `len` bytes from `start` within a game file, for files too big to read whole.
+    /// Mod folders from `overlay` are not used.
+    pub fn read_range(&self, filename: &str, start: u64, len: usize) -> Result<Vec<u8>> {
+        let mut source = self.romfs.borrow_mut();
+        let mut source = &mut *source;
+        while let RomSource::Overlaid(_, game) = source {
+            source = game;
+        }
+        match source {
+            RomSource::Image(romfs) => Ok(romfs.read_range(filename, start, len)?.into_vec()),
+            RomSource::Mounted(root) => {
+                use std::io::{Read, Seek, SeekFrom};
+                let relative = filename.strip_prefix('/').unwrap_or(filename);
+                let mut file = fs::File::open(format!("{root}{relative}"))
+                    .map_err(|err| Error::new(format!("Could not read '{relative}': {err}")))?;
+                file.seek(SeekFrom::Start(start)).map_err(Error::new)?;
+                let mut data = Vec::new();
+                file.take(len as u64).read_to_end(&mut data).map_err(Error::new)?;
+                Ok(data)
+            }
+            RomSource::Overlaid(..) => unreachable!("the loop above removes overlays"),
+        }
+    }
+
     pub fn open(&self, filename: &str) -> Vec<u8> {
         let file = self.romfs.borrow_mut().read(filename).unwrap();
         Vec::from(file.get().clone())

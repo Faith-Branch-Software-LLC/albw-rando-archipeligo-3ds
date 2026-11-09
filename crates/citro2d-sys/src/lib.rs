@@ -1,6 +1,11 @@
 //! Minimal bindings to the C shim over citro2d.
 #![no_std]
 
+/// The assembled model preview shader. `shim_model_init` keeps pointers into it, so it is static.
+#[repr(C, align(4))]
+pub struct Shader<T: ?Sized>(pub T);
+pub static MODEL_SHADER: &Shader<[u8]> = &Shader(*include_bytes!(concat!(env!("OUT_DIR"), "/model.shbin")));
+
 // Forces libctru to link after citro2d and citro3d.
 use ctru_sys as _;
 
@@ -33,5 +38,31 @@ unsafe extern "C" {
     pub fn shim_image_load_rgba8(texture_width: c_int, texture_height: c_int, width: c_int, height: c_int, pixels: *const u8) -> *mut c_void;
     pub fn shim_image_draw(image: *mut c_void, x: f32, y: f32, size: f32);
     pub fn shim_image_draw_centered(image: *mut c_void, x: f32, y: f32, size: f32, extra_turns: c_int);
+    pub fn shim_model_init(shbin: *const c_void, size: u32) -> bool;
+    pub fn shim_model_create(vertices: *const f32, vertex_count: c_int) -> *mut c_void;
+    pub fn shim_model_add_texture(model: *mut c_void, format: c_int, width: c_int, height: c_int, pixels: *const u8, size: usize) -> c_int;
+    pub fn shim_model_add_mesh(
+        model: *mut c_void,
+        first: c_int,
+        count: c_int,
+        texture: c_int,
+        alpha_cutoff: c_int,
+        wrap_u: c_int,
+        wrap_v: c_int,
+    ) -> bool;
+    pub fn shim_model_free(model: *mut c_void);
+    pub fn shim_model_draw(
+        model: *mut c_void,
+        x: f32,
+        y: f32,
+        height: f32,
+        angle: f32,
+        cx: f32,
+        cy: f32,
+        cz: f32,
+        model_height: f32,
+        model_reach: f32,
+        screen_width: c_int,
+    );
     pub fn shim_text(utf8: *const c_char, x: f32, y: f32, scale: f32, color: u32);
 }

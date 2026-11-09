@@ -10,7 +10,6 @@ use modinfo::Settings;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use rand::rngs::StdRng;
-use rand::Rng;
 use rom::flag::Flag;
 use rom::scene::SpawnPoint;
 use serde::{Serialize, Serializer};
@@ -599,7 +598,7 @@ pub fn build_crack_map(settings: &Settings, rng: &mut StdRng) -> Result<CrackMap
         },
         Cracksanity::AnyWorldPairs => {
             // Force Hyrule Castle crack to always be paired with a Lorule (Up) crack
-            let hc_match = lorule_up_cracks.remove(rng.gen_range(0..lorule_up_cracks.len()));
+            let hc_match = lorule_up_cracks.remove(crate::filler::util::index(rng, lorule_up_cracks.len()));
             hyrule_up_cracks.retain(|&p| p != Crack::HyruleCastle);
             lorule_up_cracks.retain(|&p| p != hc_match);
             crack_map.insert(Crack::HyruleCastle, hc_match);
@@ -666,7 +665,7 @@ pub fn build_crack_map(settings: &Settings, rng: &mut StdRng) -> Result<CrackMap
         },
         Cracksanity::MirroredAnyWorldPairs => {
             // Force Hyrule Castle crack to always be paired with a Lorule (Up) crack
-            let hc_match = lorule_up_cracks.remove(rng.gen_range(0..lorule_up_cracks.len()));
+            let hc_match = lorule_up_cracks.remove(crate::filler::util::index(rng, lorule_up_cracks.len()));
             hyrule_up_cracks.retain(|&p| p != Crack::HyruleCastle);
             lorule_up_cracks.retain(|&p| p != hc_match);
             crack_map.insert(Crack::HyruleCastle, hc_match);

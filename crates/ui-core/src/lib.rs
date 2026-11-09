@@ -1,5 +1,10 @@
 //! Menu logic for the app. Nothing here touches the console, so all of it is tested on a computer.
 
+pub mod bch;
+pub mod csar;
+pub mod spoiler;
+pub mod ap_yaml;
+pub mod net;
 pub mod display;
 pub mod flim;
 pub mod icons;

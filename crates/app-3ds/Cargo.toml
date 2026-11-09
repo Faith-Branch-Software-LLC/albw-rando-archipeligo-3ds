@@ -11,6 +11,7 @@ name = "albw-rando"
 path = "src/main.rs"
 
 [dependencies]
+ap-patch = { path = "../ap-patch" }
 serde_json = "1"
 block-pool = { path = "../block-pool" }
 citro2d-sys = { path = "../citro2d-sys" }
