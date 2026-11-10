@@ -14,16 +14,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest, tag: linux-x86_64 }
-          - { runner: ubuntu-24.04-arm, tag: linux-aarch64 }
+          - { runner: ubuntu-22.04, tag: linux-x86_64 }
+          - { runner: ubuntu-22.04-arm, tag: linux-aarch64 }
           - { runner: macos-15, tag: darwin-arm64 }
           - { runner: macos-15-intel, tag: darwin-x86_64 }
           - { runner: windows-latest, tag: win32-amd64 }
           - { runner: windows-11-arm, tag: win32-arm64 }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Build the module
@@ -33,7 +33,7 @@ jobs:
           sh apworld/build.sh python
           ls target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/
           test -d "target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/${{ matrix.tag }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: module-${{ matrix.tag }}
           path: target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/${{ matrix.tag }}/
@@ -42,13 +42,13 @@ jobs:
   apworld:
     name: Pack the apworld
     needs: randomizer-module
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: module-*
           path: downloaded
@@ -60,7 +60,7 @@ jobs:
             cp "$folder"/* "apworld/prebuilt/${folder#downloaded/module-}/"
           done
           APWORLD_PACK_ONLY=1 sh apworld/build.sh python
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: apworld
           path: |
@@ -70,10 +70,10 @@ jobs:
 
   app:
     name: 3DS app
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container: devkitpro/devkitarm:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust, cargo-3ds and clang
         run: |
           # ctru-sys makes its bindings with bindgen, which needs clang and its own headers.
@@ -92,7 +92,7 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="/opt/devkitpro/tools/bin:/opt/devkitpro/devkitARM/bin:$PATH"
           cargo 3ds build --release -p app-3ds
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: app
           path: target/armv6k-nintendo-3ds/release/albw-rando.3dsx
@@ -101,11 +101,11 @@ jobs:
   release:
     name: Release zip
     needs: [apworld, app]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: built
       - name: Lay out the SD card
@@ -116,7 +116,7 @@ jobs:
           touch sd/3ds/albw-rando/ap/.keep
           (cd sd && zip -r ../albw-rando-sd.zip .)
           cp built/apworld/albw_3ds.apworld .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release
           path: |
@@ -124,7 +124,7 @@ jobs:
             albw_3ds.apworld
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             albw-rando-sd.zip
