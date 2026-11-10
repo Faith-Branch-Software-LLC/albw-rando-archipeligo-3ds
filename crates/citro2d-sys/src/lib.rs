@@ -37,6 +37,7 @@ unsafe extern "C" {
     ) -> *mut c_void;
     pub fn shim_image_load_rgba8(texture_width: c_int, texture_height: c_int, width: c_int, height: c_int, pixels: *const u8) -> *mut c_void;
     pub fn shim_image_draw(image: *mut c_void, x: f32, y: f32, size: f32);
+    pub fn shim_image_draw_part(image: *mut c_void, sx: f32, sy: f32, sw: f32, sh: f32, x: f32, y: f32, w: f32, h: f32);
     pub fn shim_image_draw_centered(image: *mut c_void, x: f32, y: f32, size: f32, extra_turns: c_int);
     pub fn shim_model_init(shbin: *const c_void, size: u32) -> bool;
     pub fn shim_model_create(vertices: *const f32, vertex_count: c_int) -> *mut c_void;

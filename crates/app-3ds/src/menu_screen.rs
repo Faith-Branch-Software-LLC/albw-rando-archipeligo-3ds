@@ -8,6 +8,7 @@ use ui_core::menu::{
 
 use std::ffi::c_void;
 
+use crate::art::Skin;
 use crate::draw::{self, Font, CENTER, LEFT, RIGHT};
 use crate::icons::Icons;
 use crate::model_view::Preview;
@@ -35,6 +36,54 @@ impl Sizes {
 const ICON_SPACE: f32 = 29.0;
 const ICON_SIZE: f32 = 26.0;
 
+/// How many pixels at each end of row art keep their size when the art stretches.
+const PLATE_BORDER: f32 = 8.0;
+/// Pills are plain colors with rounded corners.
+const PILL_RADIUS: f32 = 5.0;
+
+/// The three row shapes, each with its own art.
+#[derive(Clone, Copy)]
+enum Plate {
+    Bar,
+    Card,
+    Line,
+}
+
+/// Draws a row's background: its art, or plain shapes without art. The focused row glows.
+fn plate(skin: &Skin, kind: Plate, focused: bool, y: f32, height: f32) {
+    if focused {
+        draw::glow(ROW_LEFT, y, ROW_WIDTH, height, draw::GOLD);
+    }
+    let (own, own_focused) = match kind {
+        Plate::Bar => (skin.bar, skin.bar_focused),
+        Plate::Card => (skin.card, skin.card_focused),
+        Plate::Line => (skin.line, skin.line_focused),
+    };
+    // Shapes without their own art stretch the row bar.
+    let art = if focused { own_focused.or(skin.bar_focused) } else { own.or(skin.bar) };
+    match art {
+        Some(art) => art.draw(ROW_LEFT, y, ROW_WIDTH, height, PLATE_BORDER),
+        None => {
+            draw::rect(ROW_LEFT, y, ROW_WIDTH, height, if focused { draw::CARD_ACTIVE } else { draw::CARD });
+            if focused {
+                draw::rect(ROW_LEFT, y, 3.0, height, draw::GOLD);
+            }
+        }
+    }
+}
+
+/// A pill's background: gold when picked, dark otherwise.
+fn pill_plate(picked: bool, left: f32, top: f32, width: f32) {
+    draw::rounded_rect(left, top, width, PILL_HEIGHT, PILL_RADIUS, if picked { draw::GOLD } else { draw::WELL });
+}
+
+/// The rows with their places on the page, the focused one last so its glow lies over its
+/// neighbors.
+fn in_draw_order(view: &View) -> impl Iterator<Item = (usize, &ui_core::menu::RowView)> {
+    let rows = view.rows.iter().enumerate();
+    rows.clone().filter(|(_, row)| !row.focused).chain(rows.filter(|(_, row)| row.focused))
+}
+
 /// The dark box in the top screen art that holds the text.
 const BOX_LEFT: f32 = 38.0;
 const BOX_RIGHT: f32 = 362.0;
@@ -55,7 +104,7 @@ fn note_once(line: &str) {
 
 /// `top_art`, if loaded, replaces the plain top screen.
 /// `preview`, if given, is a model and its turn in radians, drawn below the rows.
-pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, display: Display, preview: Option<(&Preview, f32)>) {
+pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, skin: &Skin, display: Display, preview: Option<(&Preview, f32)>) {
     let sizes = Sizes::new(display);
     draw::frame(
         || match top_art {
@@ -63,7 +112,10 @@ pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, display: D
             None => draw_top(view, sizes),
         },
         || {
-            draw_bottom(view, icons, sizes);
+            if let Some(background) = skin.background {
+                background.draw(0.0, 0.0, 320.0, 240.0, 0.0);
+            }
+            draw_bottom(view, icons, skin, sizes);
             if let Some((model, angle)) = preview {
                 // Below the rows and above the hint.
                 let top = view.layout.top(view.rows.len()) + 4.0;
@@ -120,44 +172,42 @@ fn centered(content: &str, x: f32, y: f32, w: f32, h: f32, scale: f32, color: u3
     draw::text(content, x + w / 2.0, y + (h - draw::line_height(scale)) / 2.0, scale, color, CENTER);
 }
 
-/// Plain rectangles only, so art can later stretch one pill image to any width.
 fn draw_pills(pills: &Pills, top: f32, scale: f32) {
     match pills {
         Pills::Choices { names, selected } => {
             for (index, (left, width)) in pill_spans(names.len()).enumerate() {
                 let picked = index == *selected;
-                draw::rect(left, top, width, PILL_HEIGHT, if picked { draw::GOLD } else { draw::WELL });
+                pill_plate(picked, left, top, width);
                 centered(&names[index], left, top, width, PILL_HEIGHT, scale, if picked { draw::INK } else { draw::MUTED });
             }
         }
         Pills::Number { value, min, max } => {
             for (left, sign) in step_lefts().into_iter().zip(["-", "+"]) {
-                draw::rect(left, top, STEP_WIDTH, PILL_HEIGHT, draw::WELL);
+                pill_plate(false, left, top, STEP_WIDTH);
                 centered(sign, left, top, STEP_WIDTH, PILL_HEIGHT, scale, draw::GOLD);
             }
             let left = step_lefts()[0] + STEP_WIDTH + 4.0;
             let width = PILL_WIDTH - 2.0 * (STEP_WIDTH + 4.0);
             let fraction = if max > min { (value - min) as f32 / (max - min) as f32 } else { 0.0 };
-            draw::rect(left, top, width, PILL_HEIGHT, draw::WELL);
-            draw::rect(left, top + PILL_HEIGHT - 3.0, width * fraction, 3.0, draw::GOLD);
+            pill_plate(false, left, top, width);
+            // Inside the rounded ends, so the fill never pokes past the corners.
+            let inner = width - 2.0 * PILL_RADIUS;
+            draw::rect(left + PILL_RADIUS, top + PILL_HEIGHT - 3.0, inner * fraction, 3.0, draw::GOLD);
             centered(&value.to_string(), left, top, width, PILL_HEIGHT - 2.0, scale, draw::WHITE);
         }
     }
 }
 
 /// Rules pages: each setting is a card with its name on top and its choices below.
-fn draw_cards(view: &View, icons: &Icons, sizes: Sizes) {
+fn draw_cards(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
     let layout = view.layout;
     let icon_size = 18.0;
     let pill_text = pill_scale(sizes);
     let name_scale = (PILL_TOP - 8.0) / draw::line_height(1.0).max(1.0);
     let name_scale = sizes.text.min(name_scale);
-    for (slot, row) in view.rows.iter().enumerate() {
+    for (slot, row) in in_draw_order(view) {
         let y = layout.top(slot);
-        draw::rect(ROW_LEFT, y, ROW_WIDTH, layout.height, if row.focused { draw::CARD_ACTIVE } else { draw::CARD });
-        if row.focused {
-            draw::rect(ROW_LEFT, y, 3.0, layout.height, draw::GOLD);
-        }
+        plate(skin, Plate::Card, row.focused, y, layout.height);
         let mut name_left = ROW_LEFT + 10.0;
         if let Some((name, image)) = row.icon.and_then(|name| Some((name, icons.get(name)?))) {
             draw::icon(image, name_left, y + 4.0, icon_size, ui_core::icons::extra_turns(name));
@@ -186,18 +236,15 @@ fn draw_scrollbar(view: &View) {
 }
 
 /// Spoiler entries: the place in small text over what it holds.
-fn draw_lines(view: &View, sizes: Sizes) {
+fn draw_lines(view: &View, skin: &Skin, sizes: Sizes) {
     let layout = view.layout;
     let per_scale = draw::line_height(1.0).max(1.0);
     let small = (sizes.text * 0.85).min(18.0 / per_scale);
     let large = sizes.text.min(22.0 / per_scale);
     let room = ROW_WIDTH - 20.0;
-    for (slot, row) in view.rows.iter().enumerate() {
+    for (slot, row) in in_draw_order(view) {
         let y = layout.top(slot);
-        draw::rect(ROW_LEFT, y, ROW_WIDTH, layout.height, if row.focused { draw::CARD_ACTIVE } else { draw::CARD });
-        if row.focused {
-            draw::rect(ROW_LEFT, y, 3.0, layout.height, draw::GOLD);
-        }
+        plate(skin, Plate::Line, row.focused, y, layout.height);
         let left = ROW_LEFT + 10.0;
         match &row.value {
             Some(value) => {
@@ -215,12 +262,12 @@ fn draw_lines(view: &View, sizes: Sizes) {
     draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
 }
 
-fn draw_bottom(view: &View, icons: &Icons, sizes: Sizes) {
+fn draw_bottom(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
     if view.layout == Layout::CARDS {
-        return draw_cards(view, icons, sizes);
+        return draw_cards(view, icons, skin, sizes);
     }
     if view.layout == Layout::LINES {
-        return draw_lines(view, sizes);
+        return draw_lines(view, skin, sizes);
     }
     let shift = if view.rows.iter().any(|row| row.icon.is_some_and(|name| icons.get(name).is_some())) { ICON_SPACE } else { 0.0 };
     let label_left = ROW_LEFT + 10.0 + shift;
@@ -245,12 +292,9 @@ fn draw_bottom(view: &View, icons: &Icons, sizes: Sizes) {
         note_once(&format!("Rows on \"{}\" drawn at {scale:.3} instead of {:.3} to fit.", view.title, sizes.text));
     }
     let text_y = (ROW_HEIGHT - draw::line_height(scale)) / 2.0;
-    for (slot, row) in view.rows.iter().enumerate() {
+    for (slot, row) in in_draw_order(view) {
         let y = Layout::ROWS.top(slot);
-        draw::rect(ROW_LEFT, y, ROW_WIDTH, ROW_HEIGHT, if row.focused { draw::CARD_ACTIVE } else { draw::CARD });
-        if row.focused {
-            draw::rect(ROW_LEFT, y, 3.0, ROW_HEIGHT, draw::GOLD);
-        }
+        plate(skin, Plate::Bar, row.focused, y, ROW_HEIGHT);
         if let Some((name, image)) = row.icon.and_then(|name| Some((name, icons.get(name)?))) {
             let turns = ui_core::icons::extra_turns(name);
             draw::icon(image, ROW_LEFT + 6.0, y + (ROW_HEIGHT - ICON_SIZE) / 2.0, ICON_SIZE, turns);

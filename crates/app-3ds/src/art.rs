@@ -82,3 +82,64 @@ pub fn load_top() -> (Option<*mut c_void>, String) {
     }
     (Some(image), format!("Top screen art: loaded {source}, {}x{}.", texture.width, texture.height))
 }
+
+/// Bottom screen art. Each piece is optional: anything missing is drawn with plain shapes. Pills
+/// are always plain colors with rounded corners.
+#[derive(Default)]
+pub struct Skin {
+    /// The whole bottom screen, 320 by 240, behind everything.
+    pub background: Option<draw::Art>,
+    /// Menu rows, 304 by 34.
+    pub bar: Option<draw::Art>,
+    pub bar_focused: Option<draw::Art>,
+    /// Option cards with pills, 304 by 56. Without them, the bars stretch to fit.
+    pub card: Option<draw::Art>,
+    pub card_focused: Option<draw::Art>,
+    /// Two-line rows, as in spoiler logs and credits, 304 by 44. Without them, the bars stretch.
+    pub line: Option<draw::Art>,
+    pub line_focused: Option<draw::Art>,
+}
+
+const BACKGROUND: (&str, &[u8]) = ("bottom.png", include_bytes!("../assets/bottom.png"));
+const BAR: (&str, &[u8]) = ("bar.png", include_bytes!("../assets/bar.png"));
+const BAR_FOCUSED: (&str, &[u8]) = ("bar-focused.png", include_bytes!("../assets/bar-focused.png"));
+const CARD: (&str, &[u8]) = ("card.png", include_bytes!("../assets/card.png"));
+const CARD_FOCUSED: (&str, &[u8]) = ("card-focused.png", include_bytes!("../assets/card-focused.png"));
+const LINE: (&str, &[u8]) = ("line.png", include_bytes!("../assets/line.png"));
+const LINE_FOCUSED: (&str, &[u8]) = ("line-focused.png", include_bytes!("../assets/line-focused.png"));
+
+fn load_art(file: (&str, &'static [u8]), notes: &mut Vec<String>) -> Option<draw::Art> {
+    let (sd, built_in, source) = read(file);
+    let data = if sd.is_empty() { built_in } else { &sd };
+    if data.is_empty() {
+        return None;
+    }
+    let loaded = picture::decode(data).map_err(|err| err.to_string()).and_then(|texture| {
+        draw::Art::load(&texture).ok_or_else(|| "not enough GPU memory".to_owned())
+    });
+    match loaded {
+        Ok(art) => {
+            notes.push(format!("loaded {source}"));
+            Some(art)
+        }
+        Err(err) => {
+            notes.push(format!("{source} could not load: {err}"));
+            None
+        }
+    }
+}
+
+/// Loads the bottom screen art. Returns it and a note for the log.
+pub fn load_skin() -> (Skin, String) {
+    let mut notes = Vec::new();
+    let skin = Skin {
+        background: load_art(BACKGROUND, &mut notes),
+        bar: load_art(BAR, &mut notes),
+        bar_focused: load_art(BAR_FOCUSED, &mut notes),
+        card: load_art(CARD, &mut notes),
+        card_focused: load_art(CARD_FOCUSED, &mut notes),
+        line: load_art(LINE, &mut notes),
+        line_focused: load_art(LINE_FOCUSED, &mut notes),
+    };
+    (skin, format!("Bottom screen art: {}.", notes.join(", ")))
+}

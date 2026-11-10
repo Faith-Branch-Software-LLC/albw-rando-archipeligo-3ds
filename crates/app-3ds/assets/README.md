@@ -6,6 +6,10 @@ card replaces the built-in one when the app starts, so art can be tried without 
 | File | What it is | Source |
 | --- | --- | --- |
 | `top.png` | Top screen picture for the menus, 400x240. Text goes in its dark box (about x 38-362, y 116-226). | Made by Sebastian Neiswanger. |
+| `bottom.png` | Bottom screen background, 320x240. The hint line sits in the strip at y 199-239. | Made by Sebastian Neiswanger. |
+| `bar.png`, `bar-focused.png` | Menu rows, 304x34, drawn at x 8, every 37 pixels from y 8. The focused row also gets a gold glow drawn in code. | Made by Sebastian Neiswanger. |
+| `card.png`, `card-focused.png` | Option cards, 304x56. The name goes in y 0-28 and the pills in y 28-48, x 8-296. | Made by Sebastian Neiswanger. |
+| `line.png`, `line-focused.png` | Two-line rows in spoiler logs and credits, 304x44. | Made by Sebastian Neiswanger. |
 | `title.bcfnt` | Font for page names. | Hylia Serif Beta 0.009 by Omni Jacala, https://artsyomni.com/hyliaserif (free, not for profit). |
 | `body.bcfnt`, `body-large.bcfnt` | Font for all other text, converted at two sizes (14 and 18 pixel glyph cells) so every size on the Display page stays sharp. | Reggae One by Fontworks, https://github.com/fontworks-fonts/Reggae, under the SIL Open Font License 1.1 (`ReggaeOne-OFL.txt`). |
 

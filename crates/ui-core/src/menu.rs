@@ -1,5 +1,6 @@
 //! Menu screens, focus, buttons, and touch. The app feeds in input and draws the returned view.
 
+use crate::ap_yaml::{ApKind, ApOptions, AP_CATEGORIES, AP_OPTIONS};
 use crate::display::{self, Display};
 use crate::presets::Preset;
 use crate::rules::{OptionDef, Rules, CATEGORIES, OPTIONS};
@@ -44,7 +45,7 @@ impl Layout {
 
     pub fn of(page: Page) -> Self {
         match page {
-            Page::Options(_) => Self::CARDS,
+            Page::Options(_) | Page::ApOptions(_) => Self::CARDS,
             Page::Spoiler | Page::About => Self::LINES,
             _ => Self::ROWS,
         }
@@ -168,6 +169,10 @@ pub enum Page {
     Spoiler,
     /// Archipelago: sharing, the player name, and patch files.
     Archipelago,
+    /// The Archipelago options pages, and the buttons to copy the rules or reset.
+    ApCategories,
+    /// One page of Archipelago options, by index into `AP_CATEGORIES`.
+    ApOptions(usize),
     /// The albw.local page is open while this page shows.
     Sharing,
     /// The Archipelago patch files on the SD card.
@@ -193,6 +198,10 @@ pub enum Look {
     NightMode,
     FreestandingModels,
 }
+
+/// The seed page's last row, which starts the run.
+const START_RANDOMIZING: &str = "Start Randomizing";
+const CONFIRM_START: usize = 2;
 
 const LOOK_CHOICES: [&str; 3] = ["As Patched", "On", "Off"];
 
@@ -251,6 +260,10 @@ enum Target {
     PatchFile(usize),
     StartSharing,
     EditPlayerName,
+    /// An Archipelago option, by index into `AP_OPTIONS`.
+    ApOption(usize),
+    ApFromRules,
+    ApDefaults,
     Look(Look),
     ApplyPatch,
     /// A spoiler entry, or a row that does nothing.
@@ -346,6 +359,13 @@ pub struct Menu {
     looks: [usize; 2],
     /// The Archipelago slot name for options files.
     pub player_name: String,
+    /// The Archipelago options the options file is made from.
+    pub ap_options: ApOptions,
+    /// Set when the Archipelago options change, until the app saves them.
+    ap_changed: bool,
+    /// The apworld on the SD card, as the Archipelago page shows it: its version, or that it is missing.
+    /// The app sets it when the Archipelago page opens and when a new apworld arrives.
+    pub apworld_status: String,
     /// Lines the sharing page shows: the address, then what has happened.
     share_status: Vec<String>,
     message: (String, Vec<String>),
@@ -423,6 +443,9 @@ impl Menu {
             patch: PatchSummary::default(),
             looks: [0; 2],
             player_name: "Player".to_owned(),
+            ap_options: ApOptions::from_rules(&Rules::default().settings()),
+            ap_changed: false,
+            apworld_status: String::new(),
             share_status: Vec::new(),
             message: (String::new(), Vec::new()),
             held_frames: 0,
@@ -552,8 +575,35 @@ impl Menu {
     }
 
     /// The options file for the current rules and player name.
+    /// Replaces the Archipelago options, as when the app loads saved ones.
+    pub fn set_ap_options(&mut self, options: ApOptions) {
+        self.ap_options = options;
+        self.ap_changed = false;
+    }
+
+    /// The Archipelago options to save, once after each change.
+    pub fn take_ap_changes(&mut self) -> Option<String> {
+        std::mem::take(&mut self.ap_changed).then(|| self.ap_options.save())
+    }
+
+    fn ap_pills(&self, index: usize) -> Pills {
+        let value = self.ap_options.value(index);
+        match AP_OPTIONS[index].kind {
+            ApKind::Toggle => Pills::Choices { names: vec!["Off".to_owned(), "On".to_owned()], selected: value as usize },
+            ApKind::Choice(choices) => {
+                Pills::Choices { names: choices.iter().map(|choice| choice.label.to_owned()).collect(), selected: value as usize }
+            }
+            ApKind::Range { min, max, .. } => Pills::Number { value, min, max },
+        }
+    }
+
+    fn ap_step(&mut self, index: usize, delta: i32) {
+        self.ap_options.step(index, delta);
+        self.ap_changed = true;
+    }
+
     pub fn options_file(&self) -> String {
-        crate::ap_yaml::options_file(&self.rules.settings(), &self.player_name, &self.preset_name)
+        crate::ap_yaml::options_file(&self.ap_options, &self.player_name)
     }
 
     /// Shows a patch that was read, ready to apply.
@@ -634,7 +684,9 @@ impl Menu {
     }
 
     fn open(&mut self, page: Page) {
-        self.stack.push(Place { page, focus: 0, scroll: 0 });
+        // The seed page opens on Start Randomizing, so A then A still makes a seed.
+        let focus = if page == Page::Confirm { CONFIRM_START } else { 0 };
+        self.stack.push(Place { page, focus, scroll: 0 });
     }
 
     fn back(&mut self) -> Action {
@@ -676,14 +728,12 @@ impl Menu {
                 row("Exit", None, "", Target::Exit),
             ],
             Page::Home => vec![
-                row("Make a Seed", None, "Review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
+                row("Make a Seed", None, "Pick the seed number, review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
                 row("Rules", None, "Change every option by hand.", Target::Open(Page::Categories)),
                 row("Presets", Some(self.preset_name.clone()), "Load a set of rules, or save your own to share.", Target::Open(Page::Presets)),
                 row("Models and Voices", None, "Choose a player model and voice pack for this seed.", Target::Open(Page::Mods)),
                 row("Spoiler Logs", None, "Stuck? Look up where items are in seeds you made, and search by item or place.", Target::ListSpoilers),
                 row("Archipelago", None, "Play in a multiworld: send your options to the host, then patch your game from their file.", Target::Open(Page::Archipelago)),
-                row("Seed Number", Some(self.seed.to_string()), "The same number and rules make the same game on this console. Press A to type one.", Target::EditSeed),
-                row("New Random Seed", None, "Picks a new seed number.", Target::RandomSeed),
                 row("Display", None, "Text sizes for these menus.", Target::Open(Page::Display)),
                 row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
                 row("Exit", None, "Return to the Homebrew Launcher.", Target::Exit),
@@ -740,8 +790,9 @@ impl Menu {
                 row("Title Size", Some(format!("{} px", self.display.title)), "Size of page names like the one above.", Target::Display(display::Setting::Title)),
             ],
             Page::Confirm => vec![
-                row("Start", None, "", Target::Generate),
-                row("Go Back", None, "", Target::Back),
+                row("Seed Number", Some(self.seed.to_string()), "The same number and rules make the same game on this console. Press A to type one.", Target::EditSeed),
+                row("New Random Seed", None, "Picks a new seed number.", Target::RandomSeed),
+                row(START_RANDOMIZING, None, "Builds the game. Keep the console plugged in.", Target::Generate),
             ],
             Page::Message => vec![row("OK", None, "", Target::Back)],
             Page::About => CREDITS.iter().map(|&(role, name, about)| row(role, Some(name.to_owned()), about, Target::Nothing)).collect(),
@@ -765,8 +816,42 @@ impl Menu {
                     Target::StartSharing,
                 ),
                 row("Player Name", Some(self.player_name.clone()), "Your name in the multiworld. Press A to type it.", Target::EditPlayerName),
+                row(
+                    "Options",
+                    None,
+                    "Set up your options file: every option the A Link Between Worlds - 3DS apworld has, plus Archipelago's own, like Death Link.",
+                    Target::Open(Page::ApCategories),
+                ),
                 row("Patch Files", None, "Apply a patch your host sent. Patches go in /3ds/albw-rando/ap.", Target::ListPatches),
             ],
+            Page::ApCategories => {
+                let mut rows = vec![
+                    row(
+                        "Copy from Rules",
+                        Some(self.preset_name.clone()),
+                        "Sets these options to match your rules, so a multiworld plays like your single-player seeds.",
+                        Target::ApFromRules,
+                    ),
+                    row("Reset to Defaults", None, "Sets every option to the apworld's default.", Target::ApDefaults),
+                ];
+                rows.extend(AP_CATEGORIES.iter().enumerate().map(|(index, name)| {
+                    let names: Vec<&str> = AP_OPTIONS.iter().filter(|option| option.category == index).map(|option| option.label).collect();
+                    row(name, None, &names.join(", "), Target::Open(Page::ApOptions(index)))
+                }));
+                rows
+            }
+            Page::ApOptions(category) => AP_OPTIONS
+                .iter()
+                .enumerate()
+                .filter(|(_, option)| option.category == category)
+                .map(|(index, option)| Row {
+                    label: option.label.to_owned(),
+                    value: Some(self.ap_options.label(index)),
+                    help: self.ap_options.help(index),
+                    target: Target::ApOption(index),
+                    icon: None,
+                })
+                .collect(),
             Page::Sharing => vec![row("Stop Sharing", None, "", Target::Back)],
             Page::Patches => self
                 .patch_files
@@ -865,6 +950,26 @@ impl Menu {
             Target::ListPatches => Action::ListPatches,
             Target::StartSharing => Action::StartSharing,
             Target::EditPlayerName => Action::EditPlayerName,
+            Target::ApOption(index) => {
+                self.ap_step(index, 1);
+                Action::None
+            }
+            Target::ApFromRules => {
+                self.ap_options = ApOptions::from_rules(&self.rules.settings());
+                self.ap_changed = true;
+                let skipped = crate::ap_yaml::unsupported(&self.rules.settings());
+                let mut text = format!("Your Archipelago options now match the {} rules.", self.preset_name);
+                if !skipped.is_empty() {
+                    text.push_str(&format!(" Archipelago can't use: {}.", skipped.join(", ")));
+                }
+                self.show_message("Options Copied", &text);
+                Action::None
+            }
+            Target::ApDefaults => {
+                self.ap_options = ApOptions::default();
+                self.ap_changed = true;
+                Action::None
+            }
             Target::PatchFile(index) => Action::OpenPatch(self.patch_files[index].clone()),
             Target::Look(look) => {
                 self.step_look(look, 1);
@@ -908,11 +1013,15 @@ impl Menu {
 
     /// The value a tap on a card's pills picks, if it lands on one.
     fn pill_at(&self, option: usize, x: f32, within: f32) -> Option<Pick> {
+        Self::pick_in(self.rules.pills(&OPTIONS[option]), x, within)
+    }
+
+    fn pick_in(pills: Pills, x: f32, within: f32) -> Option<Pick> {
         if !(PILL_TOP..PILL_TOP + PILL_HEIGHT).contains(&within) {
             return None;
         }
         let hit = |(left, width): (f32, f32)| (left..left + width).contains(&x);
-        match self.rules.pills(&OPTIONS[option]) {
+        match pills {
             Pills::Choices { names, .. } => pill_spans(names.len()).position(hit).map(Pick::Choice),
             Pills::Number { .. } => {
                 let [minus, plus] = step_lefts();
@@ -964,6 +1073,17 @@ impl Menu {
                         match self.pill_at(option, x, within) {
                             Some(Pick::Choice(choice)) => self.pick(option, choice),
                             Some(Pick::Step(delta)) => self.adjust(option, delta),
+                            None => {}
+                        }
+                        Action::None
+                    }
+                    Target::ApOption(option) => {
+                        match Self::pick_in(self.ap_pills(option), x, within) {
+                            Some(Pick::Choice(choice)) => {
+                                self.ap_options.select(option, choice);
+                                self.ap_changed = true;
+                            }
+                            Some(Pick::Step(delta)) => self.ap_step(option, delta),
                             None => {}
                         }
                         Action::None
@@ -1027,6 +1147,14 @@ impl Menu {
                 self.mod_choice(kind).step(1);
             }
         }
+        if let Some(Target::ApOption(option)) = focused {
+            if Self::repeats(pressed.left, held.left, frames) {
+                self.ap_step(option, -1);
+            }
+            if Self::repeats(pressed.right, held.right, frames) {
+                self.ap_step(option, 1);
+            }
+        }
         if let Some(Target::Look(look)) = focused {
             if Self::repeats(pressed.left, held.left, frames) {
                 self.step_look(look, -1);
@@ -1054,6 +1182,14 @@ impl Menu {
             }
             if pressed.x && !self.search.is_empty() {
                 self.set_search("");
+                return Action::None;
+            }
+        }
+        if let Page::ApOptions(category) = self.page() {
+            let step = i32::from(pressed.r) - i32::from(pressed.l);
+            if step != 0 {
+                let next = (category as i32 + step).rem_euclid(AP_CATEGORIES.len() as i32) as usize;
+                *self.place_mut() = Place { page: Page::ApOptions(next), focus: 0, scroll: 0 };
                 return Action::None;
             }
         }
@@ -1110,10 +1246,11 @@ impl Menu {
                 label: row.label.clone(),
                 value: row.value.clone(),
                 focused: index == focus,
-                adjustable: matches!(row.target, Target::Option(_) | Target::Mod(_) | Target::Look(_) | Target::Display(_)),
+                adjustable: matches!(row.target, Target::Option(_) | Target::ApOption(_) | Target::Mod(_) | Target::Look(_) | Target::Display(_)),
                 icon: row.icon,
                 pills: match row.target {
                     Target::Option(option) => Some(self.rules.pills(&OPTIONS[option])),
+                    Target::ApOption(option) => Some(self.ap_pills(option)),
                     _ => None,
                 },
             })
@@ -1185,14 +1322,17 @@ impl Menu {
             Page::Archipelago => {
                 let mut lines = paragraph(help);
                 if self.focused_target(focus, &rows) == Some(Target::StartSharing) {
-                    lines.push(format!("Your options come from your rules: {}.", self.preset_name));
-                    let skipped = crate::ap_yaml::unsupported(&self.rules.settings());
-                    if !skipped.is_empty() {
-                        lines.push(format!("Archipelago can't use: {}.", skipped.join(", ")));
-                    }
+                    lines.push(format!("apworld on the SD card: {}.", self.apworld_status));
                 }
                 ("Archipelago".to_owned(), "Multiworld with other players".to_owned(), lines, "A Select   B Back")
             }
+            Page::ApCategories => ("Archipelago Options".to_owned(), format!("For {}", self.player_name), paragraph(help), "A Select   B Back"),
+            Page::ApOptions(category) => (
+                AP_CATEGORIES[category].to_owned(),
+                "Archipelago Options".to_owned(),
+                paragraph(help),
+                "Left/Right Choose   L/R Page   B Back",
+            ),
             Page::Sharing => (
                 "Sharing on Network".to_owned(),
                 "Open this on a computer on your Wi-Fi".to_owned(),
@@ -1322,13 +1462,13 @@ mod tests {
     #[test]
     fn long_lists_scroll_to_keep_focus_visible() {
         let mut menu = menu();
-        // Exit is the eleventh Home row, and five rows fit, so the list scrolls by six.
-        for _ in 0..10 {
+        // Exit is the ninth Home row, and five rows fit, so the list scrolls by four.
+        for _ in 0..8 {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }
         let view = menu.view();
-        assert_eq!(view.scroll, 6);
+        assert_eq!(view.scroll, 4);
         assert!(view.rows.iter().any(|row| row.focused && row.label == "Exit"));
     }
 
@@ -1571,7 +1711,17 @@ mod tests {
         release(&mut menu);
         assert_eq!(menu.page(), Page::Confirm);
         assert!(menu.view().body.iter().any(|line| line == "Logic: Hard"));
+        assert!(menu.view().rows.iter().any(|row| row.focused && row.label == START_RANDOMIZING));
         assert_eq!(press(&mut menu, |b| b.a = true), Action::Generate);
+        release(&mut menu);
+        // The seed rows sit above it.
+        press(&mut menu, |b| b.up = true);
+        release(&mut menu);
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::RandomSeed);
+        release(&mut menu);
+        press(&mut menu, |b| b.up = true);
+        release(&mut menu);
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::EditSeed);
     }
 
     #[test]
@@ -1668,6 +1818,42 @@ mod tests {
     }
 
     #[test]
+    fn archipelago_options_change_and_save_once() {
+        let mut menu = menu();
+        menu.open(Page::Archipelago);
+        for _ in 0..2 {
+            press(&mut menu, |b| b.down = true);
+            release(&mut menu);
+        }
+        press(&mut menu, |b| b.a = true);
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::ApCategories);
+        // The first category, Multiworld, is under Copy from Rules and Reset to Defaults.
+        for _ in 0..2 {
+            press(&mut menu, |b| b.down = true);
+            release(&mut menu);
+        }
+        press(&mut menu, |b| b.a = true);
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::ApOptions(0));
+        assert_eq!(menu.take_ap_changes(), None);
+        // Death Link is the third option on that page.
+        for _ in 0..2 {
+            press(&mut menu, |b| b.down = true);
+            release(&mut menu);
+        }
+        press(&mut menu, |b| b.right = true);
+        release(&mut menu);
+        assert!(menu.options_file().contains("  death_link: true\n"));
+        assert!(menu.take_ap_changes().unwrap().contains("death_link: true\n"));
+        assert_eq!(menu.take_ap_changes(), None);
+        // R moves to the next page.
+        press(&mut menu, |b| b.r = true);
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::ApOptions(1));
+    }
+
+    #[test]
     fn archipelago_patches_open_from_home_and_apply() {
         let mut menu = menu();
         let row = menu.rows().iter().position(|row| row.target == Target::Open(Page::Archipelago)).unwrap();
@@ -1678,7 +1864,7 @@ mod tests {
         press(&mut menu, |b| b.a = true);
         release(&mut menu);
         assert_eq!(menu.page(), Page::Archipelago);
-        for _ in 0..2 {
+        for _ in 0..3 {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }

@@ -81,6 +81,10 @@ jobs:
           rustup toolchain install
           cargo install --locked cargo-3ds
       - name: Build
+        env:
+          # Tagged builds link the albw.local page to this release's apworld. Other builds link
+          # to the latest release.
+          ALBW_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
           . "$HOME/.cargo/env"
           export PATH="/opt/devkitpro/tools/bin:/opt/devkitpro/devkitARM/bin:$PATH"

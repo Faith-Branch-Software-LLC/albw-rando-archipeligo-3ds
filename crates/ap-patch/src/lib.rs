@@ -85,6 +85,22 @@ pub fn read(bytes: &[u8]) -> Result<Patch, String> {
     parse(&info)
 }
 
+/// The apworld version this app makes games from.
+pub fn apworld_version_needed() -> String {
+    show(NEWEST_VERSION)
+}
+
+/// Checks that `bytes` is the "A Link Between Worlds - 3DS" apworld, and returns its version.
+pub fn apworld_version(bytes: &[u8]) -> Result<String, String> {
+    let not_it = || "That is not the A Link Between Worlds - 3DS apworld.".to_owned();
+    let json = zip::read(bytes, "albw_3ds/archipelago.json").map_err(|_| not_it())?.ok_or_else(not_it)?;
+    let info: Value = serde_json::from_slice(&json).map_err(|_| not_it())?;
+    if info.get("game").and_then(Value::as_str) != Some(GAME) {
+        return Err(not_it());
+    }
+    info.get("world_version").and_then(Value::as_str).map(str::to_owned).ok_or_else(not_it)
+}
+
 /// Reads `patch_info.json` itself.
 pub fn parse(json: &[u8]) -> Result<Patch, String> {
     let info: Value = serde_json::from_slice(json).map_err(|err| format!("The patch info is damaged: {err}"))?;
@@ -348,6 +364,16 @@ mod tests {
         assert!(parse(info("0.4.0").as_bytes()).is_ok());
         assert!(parse(info("0.3.6").as_bytes()).unwrap_err().contains("0.4.0 or newer"));
         assert!(parse(info("0.5.0").as_bytes()).unwrap_err().contains("Update the app"));
+    }
+
+    #[test]
+    fn apworld_files_are_checked() {
+        assert!(apworld_version(b"not a zip").is_err());
+        // The apworld that apworld/build.sh made, when there is one.
+        let built = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/apworld/albw_3ds.apworld");
+        if let Ok(bytes) = std::fs::read(built) {
+            assert_eq!(apworld_version(&bytes).unwrap(), apworld_version_needed());
+        }
     }
 
     #[test]

@@ -121,6 +121,8 @@ fn search_spoiler(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
 
 /// Where the Archipelago player name is kept between runs.
 const PLAYER_NAME: &str = "sdmc:/3ds/albw-rando/player-name.txt";
+/// The Archipelago options, as `key: value` lines.
+const AP_OPTIONS: &str = "sdmc:/3ds/albw-rando/ap-options.yaml";
 
 fn edit_player_name(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
     let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
@@ -131,6 +133,16 @@ fn edit_player_name(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
         if let Err(err) = fs::write(PLAYER_NAME, &menu.player_name) {
             job::log(&format!("Player name not saved: {err}"));
         }
+    }
+}
+
+/// What the Archipelago page shows for the apworld on the SD card.
+fn apworld_status(version: Option<String>) -> String {
+    let needed = ap_patch::apworld_version_needed();
+    match version {
+        Some(version) if version == needed => version,
+        Some(version) => format!("{version}, but the app needs {needed}"),
+        None => "missing. The albw.local page links to GitHub".to_owned(),
     }
 }
 
@@ -235,7 +247,9 @@ fn main() {
     let (loaded_icons, icon_note) = icons::load(check);
     check_log.push_str(&format!("{icon_note}\n"));
     let (top_art, art_note) = art::load_top();
+    let (skin, skin_note) = art::load_skin();
     let mut display = art::load_display();
+    check_log.push_str(&format!("{skin_note}\n"));
     check_log.push_str(&format!("{art_note}\n{}\n", art::load_fonts(display.text)));
     let _ = fs::write(job::CHECK_LOG, check_log);
 
@@ -247,6 +261,10 @@ fn main() {
     menu.display = display;
     if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
         menu.set_player_name(&name);
+    }
+    menu.apworld_status = apworld_status(share::apworld_version());
+    if let Ok(text) = fs::read_to_string(AP_OPTIONS) {
+        menu.set_ap_options(ui_core::ap_yaml::ApOptions::load(&text));
     }
     // The albw.local page, while the sharing page shows, and what it serves.
     let mut sharing: Option<(share::Share, share::Content, Vec<String>)> = None;
@@ -330,17 +348,28 @@ fn main() {
                 for event in server.poll(content) {
                     match event {
                         share::Event::Saved(name) => received.push(format!("Received {name}")),
+                        share::Event::Apworld(version) => {
+                            received.push(format!("Received apworld {version}"));
+                            content.apworld = Some(version.clone());
+                            menu.apworld_status = apworld_status(Some(version));
+                        }
                     }
                 }
                 let mut lines = server.address_lines();
                 lines.extend(received.iter().rev().take(3).cloned());
-                if !received.is_empty() {
+                if received.iter().any(|line| line.ends_with(&format!(".{}", ap_patch::EXTENSION))) {
                     lines.push("Press B, then open Patch Files to apply it.".to_owned());
                 }
                 menu.set_share_status(lines);
             } else {
                 job::log("Sharing stopped");
                 sharing = None;
+            }
+        }
+
+        if let Some(text) = menu.take_ap_changes() {
+            if let Err(err) = fs::write(AP_OPTIONS, text) {
+                job::log(&format!("Could not save the Archipelago options: {err}"));
             }
         }
 
@@ -371,7 +400,11 @@ fn main() {
             Action::EditPlayerName => edit_player_name(&mut menu, &apt, &gfx),
             Action::StartSharing => match share::Share::start() {
                 Ok(server) => {
-                    let content = share::Content { player: menu.player_name.clone(), options_file: menu.options_file() };
+                    let content = share::Content {
+                        player: menu.player_name.clone(),
+                        options_file: menu.options_file(),
+                        apworld: share::apworld_version(),
+                    };
                     let mut lines = server.address_lines();
                     lines.push(format!("Options for {} are ready to download.", menu.player_name));
                     menu.show_sharing(lines);
@@ -453,7 +486,7 @@ fn main() {
             retired.push((frames, old));
         }
         let shown = preview.as_ref().and_then(|(_, model)| model.as_ref()).map(|model| (model, frames as f32 * 0.02));
-        menu_screen::draw(&menu.view(), &loaded_icons, top_art, display, shown);
+        menu_screen::draw(&menu.view(), &loaded_icons, top_art, &skin, display, shown);
     }
     draw::stop();
 }

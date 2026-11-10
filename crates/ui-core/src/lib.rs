@@ -3,6 +3,7 @@
 pub mod bch;
 pub mod csar;
 pub mod spoiler;
+pub mod ap_option_table;
 pub mod ap_yaml;
 pub mod net;
 pub mod display;

@@ -41,12 +41,13 @@
     <p>The host puts this in <code>Archipelago/custom_worlds/</code> so the game is "A Link Between Worlds - 3DS".</p>
     <a class="button" id="apworld" href="/albw_3ds.apworld">Download apworld</a>
     <p id="apworld-note"></p>
+    <p id="apworld-keep" hidden>To keep a copy on the 3DS for next time, drop the downloaded <code>albw_3ds.apworld</code> in step 3.</p>
   </section>
 
   <section>
-    <h2>3. Send your patch to the 3DS</h2>
+    <h2>3. Send files to the 3DS</h2>
     <p>After the host generates, send the <code>.apalbw3ds</code> file with your name on it.</p>
-    <div id="drop">Drop the file here, or <label><u>choose it</u><input id="file" type="file" accept=".apalbw3ds" hidden></label></div>
+    <div id="drop">Drop the file here, or <label><u>choose it</u><input id="file" type="file" accept=".apalbw3ds,.apworld" hidden></label></div>
     <div id="status"></div>
   </section>
 
@@ -57,13 +58,15 @@
   function say(text, kind) { statusLine.textContent = text; statusLine.className = kind || ""; }
 
   async function send(file) {
-    if (!file.name.toLowerCase().endsWith(".apalbw3ds")) {
-      say("That is not a .apalbw3ds file. Patches for the original apworld end in .apalbw and do not work here.", "bad");
+    const name = file.name.toLowerCase();
+    const route = name.endsWith(".apalbw3ds") ? "/patch" : name.endsWith(".apworld") ? "/apworld" : null;
+    if (!route) {
+      say("That is not a .apalbw3ds patch or an .apworld file. Patches for the original apworld end in .apalbw and do not work here.", "bad");
       return;
     }
     say("Sending " + file.name + "...");
     try {
-      const reply = await fetch("/patch", { method: "POST", headers: { "X-File-Name": encodeURIComponent(file.name) }, body: file });
+      const reply = await fetch(route, { method: "POST", headers: { "X-File-Name": encodeURIComponent(file.name) }, body: file });
       const text = await reply.text();
       say(text, reply.ok ? "good" : "bad");
     } catch (err) {
@@ -83,9 +86,13 @@
   function show(state) {
     if (state.player) document.getElementById("player").textContent = state.player;
     const link = document.getElementById("apworld");
-    link.classList.toggle("off", !state.apworld);
-    document.getElementById("apworld-note").textContent = state.apworld ? "Version " + state.apworld + "."
-      : "The apworld is not on this 3DS yet. Copy the app's release zip to the SD card, or let the app download it.";
+    const here = state.apworld && state.apworld === state.needs;
+    link.href = here ? "/albw_3ds.apworld" : state.download;
+    link.textContent = here ? "Download apworld" : "Download apworld from GitHub";
+    document.getElementById("apworld-keep").hidden = here;
+    document.getElementById("apworld-note").textContent = here ? "Version " + state.apworld + "."
+      : state.apworld ? "This 3DS has apworld " + state.apworld + ", but the app needs " + state.needs + ". Get it from GitHub instead."
+      : "The apworld is not on this 3DS, so this button gets version " + state.needs + " from GitHub.";
   }
 
   function connect() {

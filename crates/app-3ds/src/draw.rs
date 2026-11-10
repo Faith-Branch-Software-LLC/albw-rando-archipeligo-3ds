@@ -162,9 +162,72 @@ pub fn load_picture(picture: &ui_core::picture::Texture) -> *mut core::ffi::c_vo
     unsafe { c2d::shim_image_load_rgba8(texture_width, texture_height, picture.width.into(), picture.height.into(), picture.pixels.as_ptr()) }
 }
 
+/// A loaded picture and its size in pixels, for art drawn at other sizes.
+#[derive(Clone, Copy)]
+pub struct Art {
+    image: *mut core::ffi::c_void,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Art {
+    /// Loads a decoded picture. Returns None if the GPU memory is full.
+    pub fn load(picture: &ui_core::picture::Texture) -> Option<Self> {
+        let image = load_picture(picture);
+        (!image.is_null()).then(|| Self { image, width: picture.width.into(), height: picture.height.into() })
+    }
+
+    fn part(self, sx: f32, sy: f32, sw: f32, sh: f32, x: f32, y: f32, w: f32, h: f32) {
+        // SAFETY: Only called inside `frame`, and loaded images live until the app exits.
+        unsafe { c2d::shim_image_draw_part(self.image, sx, sy, sw, sh, x, y, w, h) };
+    }
+
+    /// Draws the art filling w by h. Art already that size is drawn as is. Otherwise the corners,
+    /// `border` pixels on a side, keep their size, the edges stretch one way, and the middle both.
+    pub fn draw(self, x: f32, y: f32, w: f32, h: f32, border: f32) {
+        if (self.width - w).abs() < 0.5 && (self.height - h).abs() < 0.5 {
+            return self.part(0.0, 0.0, self.width, self.height, x, y, w, h);
+        }
+        let bx = border.min(self.width / 2.0).min(w / 2.0);
+        let by = border.min(self.height / 2.0).min(h / 2.0);
+        let source = [(0.0, bx), (bx, self.width - 2.0 * bx), (self.width - bx, bx)];
+        let target = [(x, bx), (x + bx, w - 2.0 * bx), (x + w - bx, bx)];
+        let source_rows = [(0.0, by), (by, self.height - 2.0 * by), (self.height - by, by)];
+        let target_rows = [(y, by), (y + by, h - 2.0 * by), (y + h - by, by)];
+        for ((sy, sh), (ty, th)) in source_rows.into_iter().zip(target_rows) {
+            for ((sx, sw), (tx, tw)) in source.into_iter().zip(target) {
+                self.part(sx, sy, sw, sh, tx, ty, tw, th);
+            }
+        }
+    }
+}
+
+/// A soft glow around a box: layers of the color, fainter as they spread out.
+pub fn glow(x: f32, y: f32, w: f32, h: f32, color: u32) {
+    let rgb = color & 0x00FF_FFFF;
+    for (spread, alpha) in [(5.0, 18u32), (4.0, 24), (3.0, 34), (2.0, 48), (1.0, 70)] {
+        let layer = rgb | (alpha << 24);
+        // Corners stay inside the spread, so the glow reads as rounded.
+        rect(x - spread + 1.0, y - spread, w + 2.0 * spread - 2.0, h + 2.0 * spread, layer);
+        rect(x - spread, y - spread + 1.0, 1.0, h + 2.0 * spread - 2.0, layer);
+        rect(x + w + spread - 1.0, y - spread + 1.0, 1.0, h + 2.0 * spread - 2.0, layer);
+    }
+}
+
 pub fn rect(x: f32, y: f32, w: f32, h: f32, color: u32) {
     // SAFETY: Only called inside `frame`.
     unsafe { c2d::shim_rect(x, y, w, h, color) };
+}
+
+/// A rectangle with rounded corners. The color should be opaque: the pieces overlap at the corners.
+pub fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) {
+    let r = radius.min(w / 2.0).min(h / 2.0);
+    rect(x + r, y, w - 2.0 * r, h, color);
+    rect(x, y + r, r, h - 2.0 * r, color);
+    rect(x + w - r, y + r, r, h - 2.0 * r, color);
+    for (cx, cy) in [(x + r, y + r), (x + w - r, y + r), (x + r, y + h - r), (x + w - r, y + h - r)] {
+        circle(cx, cy, r, color);
+    }
 }
 
 pub fn circle(x: f32, y: f32, radius: f32, color: u32) {

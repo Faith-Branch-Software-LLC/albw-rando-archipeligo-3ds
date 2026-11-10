@@ -192,6 +192,26 @@ void shim_image_draw(void *handle, float x, float y, float size) {
     C2D_DrawImageAt(c2d, x, y, 0.0f, NULL, scale, scale);
 }
 
+// Draws the part of an image at sx, sy, sw by sh pixels, stretched to fill w by h at x, y. Used to
+// stretch art to any size while keeping its edges sharp.
+void shim_image_draw_part(void *handle, float sx, float sy, float sw, float sh, float x, float y, float w, float h) {
+    ShimImage *image = handle;
+    if (sw <= 0.0f || sh <= 0.0f || w <= 0.0f || h <= 0.0f) return;
+    const Tex3DS_SubTexture *whole = &image->sub;
+    float u_per_pixel = (whole->right - whole->left) / image->width;
+    float v_per_pixel = (whole->bottom - whole->top) / image->height;
+    Tex3DS_SubTexture part = {
+        .width = (u16)sw,
+        .height = (u16)sh,
+        .left = whole->left + sx * u_per_pixel,
+        .right = whole->left + (sx + sw) * u_per_pixel,
+        .top = whole->top + sy * v_per_pixel,
+        .bottom = whole->top + (sy + sh) * v_per_pixel,
+    };
+    C2D_Image c2d = { .tex = &image->tex, .subtex = &part };
+    C2D_DrawImageAt(c2d, x, y, 0.0f, NULL, w / sw, h / sh);
+}
+
 // Draws an image scaled to fit a size by size square, centered in it, turned the way it was loaded
 // plus extra_turns quarter turns counterclockwise.
 void shim_image_draw_centered(void *handle, float x, float y, float size, int extra_turns) {

@@ -21,8 +21,13 @@ pub const APWORLD_VERSION: &str = "sdmc:/3ds/albw-rando/apworld/version.txt";
 const PAGE: &str = include_str!("share_page.html");
 const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
-/// Patch files are tens of kilobytes. Anything this large is not one.
-const MOST_UPLOAD: usize = 8 * 1024 * 1024;
+/// Patch files are tens of kilobytes, and the apworld a few megabytes. Anything this large is
+/// neither.
+const MOST_UPLOAD: usize = 32 * 1024 * 1024;
+/// How much one connection reads in a frame, so a large upload does not stall the screen.
+const MOST_READ_PER_FRAME: usize = 512 * 1024;
+/// Where releases are published.
+pub const REPOSITORY: &str = "Faith-Branch-Software-LLC/albw-rando-archipeligo-3ds";
 const CHUNK: usize = 16 * 1024;
 /// Announce the name again now and then, about every 30 seconds at 60 frames a second.
 const ANNOUNCE_EVERY: u32 = 1800;
@@ -31,12 +36,16 @@ const ANNOUNCE_EVERY: u32 = 1800;
 pub struct Content {
     pub player: String,
     pub options_file: String,
+    /// The version of the apworld on the SD card, from `apworld_version`.
+    pub apworld: Option<String>,
 }
 
 /// Something the menu should hear about.
 pub enum Event {
     /// A patch arrived and was saved under this name.
     Saved(String),
+    /// An apworld arrived and was saved. It has this version.
+    Apworld(String),
 }
 
 enum State {
@@ -65,7 +74,8 @@ pub struct Share {
     _soc: Soc,
 }
 
-fn apworld_version() -> Option<String> {
+/// The version of the apworld on the SD card, or None when it is missing.
+pub fn apworld_version() -> Option<String> {
     if !Path::new(APWORLD).exists() {
         return None;
     }
@@ -73,7 +83,26 @@ fn apworld_version() -> Option<String> {
 }
 
 fn status_json(content: &Content) -> String {
-    serde_json::json!({ "player": content.player, "apworld": apworld_version() }).to_string()
+    serde_json::json!({
+        "player": content.player,
+        "apworld": content.apworld,
+        "needs": ap_patch::apworld_version_needed(),
+        "download": release_link(),
+    })
+    .to_string()
+}
+
+/// The release tag this build came from. The release workflow sets it.
+fn release_tag() -> Option<&'static str> {
+    option_env!("ALBW_RELEASE_TAG").filter(|tag| !tag.is_empty())
+}
+
+/// Where a computer can download the apworld that matches this app.
+pub fn release_link() -> String {
+    match release_tag() {
+        Some(tag) => format!("https://github.com/{REPOSITORY}/releases/download/{tag}/albw_3ds.apworld"),
+        None => format!("https://github.com/{REPOSITORY}/releases/latest"),
+    }
 }
 
 impl Share {
@@ -171,20 +200,24 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
     loop {
         match &mut connection.state {
             State::Reading(buffer) => {
-                let mut chunk = [0u8; 4096];
-                match connection.stream.read(&mut chunk) {
-                    Ok(0) => {
-                        connection.state = finished();
-                        return;
-                    }
-                    Ok(len) => {
-                        connection.idle = 0;
-                        buffer.extend_from_slice(&chunk[..len]);
-                    }
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
-                    Err(_) => {
-                        connection.state = finished();
-                        return;
+                let mut chunk = vec![0u8; CHUNK];
+                let mut read = 0;
+                while read < MOST_READ_PER_FRAME {
+                    match connection.stream.read(&mut chunk) {
+                        Ok(0) => {
+                            connection.state = finished();
+                            return;
+                        }
+                        Ok(len) => {
+                            connection.idle = 0;
+                            buffer.extend_from_slice(&chunk[..len]);
+                            read += len;
+                        }
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                        Err(_) => {
+                            connection.state = finished();
+                            return;
+                        }
                     }
                 }
                 let request = match net::parse_request(buffer) {
@@ -196,14 +229,19 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                     }
                 };
                 if request.content_length > MOST_UPLOAD {
-                    connection.state = reply(net::response("413 Payload Too Large", "text/plain", b"That file is too large to be a patch."));
+                    connection.state = reply(net::response("413 Payload Too Large", "text/plain", b"That file is too large."));
                     continue;
                 }
-                if buffer.len() < request.body_start + request.content_length {
+                let end = request.body_start + request.content_length;
+                if buffer.len() < end {
+                    // Grow once to the full size, instead of doubling past it.
+                    buffer.reserve_exact(end - buffer.len());
                     return;
                 }
-                let body = buffer[request.body_start..request.body_start + request.content_length].to_vec();
-                connection.state = route(&request, &body, content, status, events);
+                let State::Reading(buffer) = std::mem::replace(&mut connection.state, State::Reading(Vec::new())) else {
+                    unreachable!()
+                };
+                connection.state = route(&request, &buffer[request.body_start..end], content, status, events);
             }
             State::Writing { data, sent, file } => {
                 if *sent >= data.len() {
@@ -336,8 +374,38 @@ fn route(request: &net::Request, body: &[u8], content: &Content, status: &str, e
                 Err(err) => text("500 Internal Server Error", &format!("The 3DS could not save the file: {err}")),
             }
         }
+        ("POST", "/apworld") => {
+            // Checked before saving, so the page only ever offers an apworld this app can patch for.
+            match ap_patch::apworld_version(body) {
+                Ok(version) if version == ap_patch::apworld_version_needed() => match save_apworld(body, &version) {
+                    Ok(()) => {
+                        job::log(&format!("Received apworld {version}, {} bytes", body.len()));
+                        events.push(Event::Apworld(version.clone()));
+                        text("200 OK", &format!("Saved apworld {version} on the 3DS. Hosts can download it from this page now."))
+                    }
+                    Err(err) => text("500 Internal Server Error", &format!("The 3DS could not save the file: {err}")),
+                },
+                Ok(version) => text(
+                    "400 Bad Request",
+                    &format!("That is apworld {version}. This app needs {}.", ap_patch::apworld_version_needed()),
+                ),
+                Err(problem) => text("400 Bad Request", &problem),
+            }
+        }
         _ => text("404 Not Found", "Nothing here."),
     }
+}
+
+fn save_apworld(body: &[u8], version: &str) -> std::io::Result<()> {
+    let target = Path::new(APWORLD);
+    if let Some(folder) = target.parent() {
+        fs::create_dir_all(folder)?;
+    }
+    let temporary = target.with_extension("part");
+    fs::write(&temporary, body)?;
+    let _ = fs::remove_file(target);
+    fs::rename(&temporary, target)?;
+    fs::write(APWORLD_VERSION, format!("{version}\n"))
 }
 
 fn save_patch(name: &str, body: &[u8]) -> std::io::Result<()> {
