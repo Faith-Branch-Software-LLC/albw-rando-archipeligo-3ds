@@ -16,7 +16,7 @@ jobs:
         include:
           - { runner: ubuntu-latest, tag: linux-x86_64 }
           - { runner: ubuntu-24.04-arm, tag: linux-aarch64 }
-          - { runner: macos-14, tag: darwin-arm64 }
+          - { runner: macos-15, tag: darwin-arm64 }
           - { runner: macos-15-intel, tag: darwin-x86_64 }
           - { runner: windows-latest, tag: win32-amd64 }
           - { runner: windows-11-arm, tag: win32-arm64 }
@@ -74,8 +74,11 @@ jobs:
     container: devkitpro/devkitarm:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust and cargo-3ds
+      - name: Install Rust, cargo-3ds and clang
         run: |
+          # ctru-sys makes its bindings with bindgen, which needs clang and its own headers.
+          apt-get update
+          apt-get install -y --no-install-recommends clang libclang-dev
           curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
           . "$HOME/.cargo/env"
           rustup toolchain install
