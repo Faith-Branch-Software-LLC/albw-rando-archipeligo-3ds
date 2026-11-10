@@ -55,7 +55,17 @@ enum State {
     Writing { data: Vec<u8>, sent: usize, file: Option<File> },
     /// An open WebSocket that gets status messages.
     Socket { out: Vec<u8> },
+    /// Everything is sent and our side is shut. Waits for the browser to close its side, because
+    /// closing at once can throw away the end of the reply, and the browser then shows an error.
+    Closing { frames: u32 },
+    /// Done. Dropped at the end of the frame.
+    Closed,
 }
+
+/// How long a closing connection waits for the browser, about 3 seconds at 60 frames a second.
+const CLOSE_WAIT_FRAMES: u32 = 180;
+/// Browsers open several connections at once, some of them spare ones that may never be used.
+const MOST_CONNECTIONS: usize = 16;
 
 struct Connection {
     stream: TcpStream,
@@ -167,10 +177,30 @@ impl Share {
             }
         }
 
-        while let Ok((stream, _)) = self.listener.accept() {
-            if stream.set_nonblocking(true).is_ok() && self.connections.len() < 8 {
-                self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0 });
+        while let Ok((stream, from)) = self.listener.accept() {
+            if stream.set_nonblocking(true).is_err() {
+                continue;
             }
+            if self.connections.len() >= MOST_CONNECTIONS {
+                // Make room by dropping the connection that has waited longest without a request.
+                let quietest = self
+                    .connections
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, connection)| matches!(&connection.state, State::Reading(buffer) if buffer.is_empty()) || matches!(connection.state, State::Closing { .. }))
+                    .max_by_key(|(_, connection)| connection.idle)
+                    .map(|(index, _)| index);
+                match quietest {
+                    Some(index) => {
+                        self.connections.remove(index);
+                    }
+                    None => {
+                        job::log(&format!("Sharing: too many connections, turned away {from}"));
+                        continue;
+                    }
+                }
+            }
+            self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0 });
         }
 
         let status = status_json(content);
@@ -190,7 +220,7 @@ impl Share {
         }
         // Drop finished connections, and any quiet for about 20 seconds.
         self.connections.retain(|connection| connection.idle < 1200 || matches!(connection.state, State::Socket { .. }));
-        self.connections.retain(|connection| !matches!(&connection.state, State::Writing { data, sent, file } if *sent >= data.len() && file.is_none()));
+        self.connections.retain(|connection| !matches!(connection.state, State::Closed));
         events
     }
 }
@@ -261,7 +291,13 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                                 }
                             }
                         }
-                        None => return,
+                        None => {
+                            // All sent: shut our side, then wait for the browser to close.
+                            let _ = connection.stream.flush();
+                            let _ = connection.stream.shutdown(std::net::Shutdown::Write);
+                            connection.state = State::Closing { frames: 0 };
+                            continue;
+                        }
                     }
                 }
                 match connection.stream.write(&data[*sent..]) {
@@ -276,6 +312,29 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                     }
                 }
             }
+            State::Closing { frames } => {
+                *frames += 1;
+                let mut chunk = [0u8; 512];
+                loop {
+                    match connection.stream.read(&mut chunk) {
+                        Ok(0) => {
+                            connection.state = finished();
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                        Err(_) => {
+                            connection.state = finished();
+                            return;
+                        }
+                    }
+                }
+                if *frames > CLOSE_WAIT_FRAMES {
+                    connection.state = finished();
+                }
+                return;
+            }
+            State::Closed => return,
             State::Socket { out } => {
                 connection.idle = 0;
                 let mut chunk = [0u8; 512];
@@ -315,7 +374,7 @@ fn reply(data: Vec<u8>) -> State {
 }
 
 fn finished() -> State {
-    State::Writing { data: Vec::new(), sent: 0, file: None }
+    State::Closed
 }
 
 fn text(status: &str, message: &str) -> State {
@@ -324,6 +383,7 @@ fn text(status: &str, message: &str) -> State {
 
 fn route(request: &net::Request, body: &[u8], content: &Content, status: &str, events: &mut Vec<Event>) -> State {
     let path = request.path.split('?').next().unwrap_or("");
+    job::log(&format!("Sharing: {} {path}", request.method));
     match (request.method.as_str(), path) {
         ("GET", "/ws") if request.wants_websocket() => match net::websocket_accept(request) {
             Some(mut out) => {

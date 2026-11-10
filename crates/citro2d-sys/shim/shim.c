@@ -10,6 +10,9 @@
 
 static C3D_RenderTarget *targets[2];
 static C2D_TextBuf text_buf;
+// Text that is only measured goes here, cleared before each use. Measuring into text_buf filled it
+// on pages with long text, which wrap a line by measuring it word by word, and then nothing drew.
+static C2D_TextBuf measure_buf;
 // Fonts loaded from the SD card, by slot. A missing font is NULL, which draws with the system font.
 static C2D_Font fonts[2];
 
@@ -29,7 +32,8 @@ bool shim_init(void) {
     targets[0] = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     targets[1] = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     text_buf = C2D_TextBufNew(4096);
-    return targets[0] && targets[1] && text_buf;
+    measure_buf = C2D_TextBufNew(1024);
+    return targets[0] && targets[1] && text_buf && measure_buf;
 }
 
 void shim_exit(void) {
@@ -37,6 +41,7 @@ void shim_exit(void) {
         if (fonts[slot]) C2D_FontFree(fonts[slot]);
     }
     C2D_TextBufDelete(text_buf);
+    C2D_TextBufDelete(measure_buf);
     C2D_Fini();
     C3D_Fini();
 }
@@ -81,7 +86,8 @@ static C2D_Font font_in(int font) {
 // The width that shim_text_aligned would draw the text at.
 float shim_text_width(const char *utf8, float scale, int font) {
     C2D_Text text;
-    C2D_TextFontParse(&text, font_in(font), text_buf, utf8);
+    C2D_TextBufClear(measure_buf);
+    C2D_TextFontParse(&text, font_in(font), measure_buf, utf8);
     float width = 0.0f;
     // citro2d sizes every font so that scale 1 draws 30 pixel tall glyph cells.
     C2D_TextGetDimensions(&text, scale, scale, &width, NULL);

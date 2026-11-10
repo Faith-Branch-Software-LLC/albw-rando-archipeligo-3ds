@@ -4,7 +4,7 @@ use std::ffi::CString;
 
 use citro2d_sys as c2d;
 
-const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
+pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((a as u32) << 24) | ((b as u32) << 16) | ((g as u32) << 8) | r as u32
 }
 

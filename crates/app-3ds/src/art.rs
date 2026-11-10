@@ -98,6 +98,8 @@ pub struct Skin {
     /// Two-line rows, as in spoiler logs and credits, 304 by 44. Without them, the bars stretch.
     pub line: Option<draw::Art>,
     pub line_focused: Option<draw::Art>,
+    /// The box the spinning model shows in on the Models and Voices page, 128 by 106.
+    pub model_box: Option<draw::Art>,
 }
 
 const BACKGROUND: (&str, &[u8]) = ("bottom.png", include_bytes!("../assets/bottom.png"));
@@ -107,6 +109,7 @@ const CARD: (&str, &[u8]) = ("card.png", include_bytes!("../assets/card.png"));
 const CARD_FOCUSED: (&str, &[u8]) = ("card-focused.png", include_bytes!("../assets/card-focused.png"));
 const LINE: (&str, &[u8]) = ("line.png", include_bytes!("../assets/line.png"));
 const LINE_FOCUSED: (&str, &[u8]) = ("line-focused.png", include_bytes!("../assets/line-focused.png"));
+const MODEL_BOX: (&str, &[u8]) = ("model-box.png", include_bytes!("../assets/model-box.png"));
 
 fn load_art(file: (&str, &'static [u8]), notes: &mut Vec<String>) -> Option<draw::Art> {
     let (sd, built_in, source) = read(file);
@@ -140,6 +143,7 @@ pub fn load_skin() -> (Skin, String) {
         card_focused: load_art(CARD_FOCUSED, &mut notes),
         line: load_art(LINE, &mut notes),
         line_focused: load_art(LINE_FOCUSED, &mut notes),
+        model_box: load_art(MODEL_BOX, &mut notes),
     };
     (skin, format!("Bottom screen art: {}.", notes.join(", ")))
 }

@@ -38,6 +38,13 @@ const ICON_SIZE: f32 = 26.0;
 
 /// How many pixels at each end of row art keep their size when the art stretches.
 const PLATE_BORDER: f32 = 8.0;
+/// The model preview's box ends a few pixels above the hint bar, which starts at y 199.
+const MODEL_BOX_BOTTOM: f32 = 194.0;
+/// The box is centered, and wide enough for the model as it turns.
+const MODEL_BOX_WIDTH: f32 = 128.0;
+const MODEL_BOX_LEFT: f32 = 160.0 - MODEL_BOX_WIDTH / 2.0;
+/// Room between the model and the box's edges.
+const MODEL_MARGIN: f32 = 10.0;
 /// Pills are plain colors with rounded corners.
 const PILL_RADIUS: f32 = 5.0;
 
@@ -117,10 +124,15 @@ pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, skin: &Ski
             }
             draw_bottom(view, icons, skin, sizes);
             if let Some((model, angle)) = preview {
-                // Below the rows and above the hint.
-                let top = view.layout.top(view.rows.len()) + 4.0;
-                let bottom = 204.0;
-                model.draw(160.0, (top + bottom) / 2.0, bottom - top, angle, 320);
+                // A box below the rows and above the hint bar, clear of the focused row's glow.
+                let top = view.layout.top(view.rows.len()) + 6.0;
+                let height = MODEL_BOX_BOTTOM - top;
+                match skin.model_box.or(skin.line) {
+                    Some(art) => art.draw(MODEL_BOX_LEFT, top, MODEL_BOX_WIDTH, height, PLATE_BORDER),
+                    None => draw::rect(MODEL_BOX_LEFT, top, MODEL_BOX_WIDTH, height, draw::CARD),
+                }
+                let room = height - 2.0 * MODEL_MARGIN;
+                model.draw(160.0, top + height / 2.0, room, angle, 320);
             }
         },
     );
@@ -161,6 +173,105 @@ fn draw_top(view: &View, sizes: Sizes) {
 fn pill_scale(sizes: Sizes) -> f32 {
     let per_scale = draw::line_height(1.0);
     if per_scale > 0.0 { sizes.text.min((PILL_HEIGHT - 2.0) / per_scale) } else { sizes.text }
+}
+
+/// The hint line's text color, light yellow so it stands out on the bar.
+const HINT_COLOR: u32 = draw::rgba(0xFF, 0xEE, 0x9C, 255);
+/// The middle of the bar at the bottom of the background art (y 199 to 239).
+const HINT_MIDDLE: f32 = 219.0;
+/// Button badges are this tall, and round buttons this wide.
+const BADGE: f32 = 16.0;
+const HINT_GAP: f32 = 12.0;
+
+/// A control named in the hint line, drawn the way it looks on the console.
+enum Control<'a> {
+    /// A, B, X or Y: a letter in a circle.
+    Round(&'a str),
+    /// L/R or START: a word in a rounded box.
+    Wide(&'a str),
+    /// The D-pad, with the directions in use lit.
+    Pad { across: bool },
+}
+
+impl Control<'_> {
+    fn of(key: &str) -> Option<Control<'_>> {
+        match key {
+            "A" | "B" | "X" | "Y" => Some(Control::Round(key)),
+            "L/R" | "START" | "Start" | "SELECT" => Some(Control::Wide(key)),
+            "Left/Right" => Some(Control::Pad { across: true }),
+            "Up/Down" => Some(Control::Pad { across: false }),
+            _ => None,
+        }
+    }
+
+    fn width(&self, key_scale: f32) -> f32 {
+        match self {
+            Control::Round(_) | Control::Pad { .. } => BADGE,
+            Control::Wide(key) => draw::text_width(Font::Body, key, key_scale) + 10.0,
+        }
+    }
+
+    fn draw(&self, left: f32, key_scale: f32) {
+        let top = HINT_MIDDLE - BADGE / 2.0;
+        match self {
+            Control::Round(key) => {
+                draw::circle(left + BADGE / 2.0, HINT_MIDDLE, BADGE / 2.0, HINT_COLOR);
+                centered(key, left, top, BADGE, BADGE, key_scale, draw::INK);
+            }
+            Control::Wide(key) => {
+                let width = self.width(key_scale);
+                draw::rounded_rect(left, top, width, BADGE, BADGE / 2.0, HINT_COLOR);
+                centered(key, left, top, width, BADGE, key_scale, draw::INK);
+            }
+            Control::Pad { across } => {
+                // A plus sign, with the arms in use lit and the others dim.
+                let arm = 5.0;
+                let (lit, unlit) = (HINT_COLOR, draw::DIM);
+                let (horizontal, vertical) = if *across { (lit, unlit) } else { (unlit, lit) };
+                draw::rect(left + arm + 0.5, top, BADGE - 2.0 * arm - 1.0, BADGE, vertical);
+                draw::rect(left, top + arm + 0.5, BADGE, BADGE - 2.0 * arm - 1.0, horizontal);
+                draw::rect(left + arm + 0.5, top + arm + 0.5, BADGE - 2.0 * arm - 1.0, BADGE - 2.0 * arm - 1.0, lit);
+            }
+        }
+    }
+}
+
+/// The hint line, such as "A Select   B Back": each control drawn as a button, then what it does.
+fn draw_hint(hint: &str, sizes: Sizes) {
+    let per_scale = draw::line_height(1.0).max(1.0);
+    let key_scale = sizes.text.min((BADGE - 3.0) / per_scale);
+    let parts: Vec<(Option<Control>, &str)> = hint
+        .split("   ")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.split_once(' ') {
+            Some((key, label)) => match Control::of(key) {
+                Some(control) => (Some(control), label),
+                None => (None, part),
+            },
+            None => (None, part),
+        })
+        .collect();
+    let width_at = |scale: f32| {
+        parts
+            .iter()
+            .map(|(control, label)| control.as_ref().map_or(0.0, |control| control.width(key_scale) + 4.0) + draw::text_width(Font::Body, label, scale))
+            .sum::<f32>()
+            + HINT_GAP * parts.len().saturating_sub(1) as f32
+    };
+    let room = 304.0;
+    let full = width_at(sizes.text);
+    let scale = if full > room && full > 0.0 { sizes.text * room / full } else { sizes.text };
+    let mut left = 160.0 - width_at(scale).min(room) / 2.0;
+    let text_top = HINT_MIDDLE - draw::line_height(scale) / 2.0;
+    for (control, label) in &parts {
+        if let Some(control) = control {
+            control.draw(left, key_scale);
+            left += control.width(key_scale) + 4.0;
+        }
+        draw::text(label, left, text_top, scale, HINT_COLOR, LEFT);
+        left += draw::text_width(Font::Body, label, scale) + HINT_GAP;
+    }
 }
 
 /// Draws text centered in a box, made smaller if it is too wide.
@@ -221,7 +332,7 @@ fn draw_cards(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
         }
     }
     draw_scrollbar(view);
-    draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
+    draw_hint(&view.hint, sizes);
 }
 
 fn draw_scrollbar(view: &View) {
@@ -259,7 +370,7 @@ fn draw_lines(view: &View, skin: &Skin, sizes: Sizes) {
         }
     }
     draw_scrollbar(view);
-    draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
+    draw_hint(&view.hint, sizes);
 }
 
 fn draw_bottom(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
@@ -313,5 +424,5 @@ fn draw_bottom(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
         }
     }
     draw_scrollbar(view);
-    draw::text_fit(Font::Body, &view.hint, 160.0, 212.0, sizes.text, 304.0, draw::MUTED, CENTER);
+    draw_hint(&view.hint, sizes);
 }
