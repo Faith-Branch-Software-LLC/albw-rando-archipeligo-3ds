@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "A Link Between Worlds randomizer and Archipelago patcher"
-authors = ["Sebastian Neiswanger"]
+authors = ["Faith Branch Software LLC"]
 
 [[bin]]
 name = "albw-rando"
@@ -17,6 +17,7 @@ block-pool = { path = "../block-pool" }
 citro2d-sys = { path = "../citro2d-sys" }
 ctru-rs = { workspace = true }
 ctru-sys = { workspace = true }
+libc = "0.2"
 modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
 randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
 rom = { path = "../../vendor/z17-randomizer/rom" }

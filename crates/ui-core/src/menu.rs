@@ -1,12 +1,15 @@
 //! Menu screens, focus, buttons, and touch. The app feeds in input and draws the returned view.
 
 use crate::ap_yaml::{ApKind, ApOptions, AP_CATEGORIES, AP_OPTIONS};
-use crate::display::{self, Display};
 use crate::presets::Preset;
 use crate::rules::{OptionDef, Rules, CATEGORIES, OPTIONS};
 use crate::spoiler::Spoiler;
 
 pub const ROW_TOP: f32 = 8.0;
+/// The focused row is scrolled to stay above this line, with room for its glow.
+pub const VIEW_BOTTOM: f32 = 193.0;
+/// The hint bar starts here. Rows are drawn and tapped only above it, so a row can show cut off.
+pub const HINT_TOP: f32 = 199.0;
 pub const ROW_HEIGHT: f32 = 34.0;
 pub const ROW_GAP: f32 = 3.0;
 pub const VISIBLE_ROWS: usize = 5;
@@ -26,6 +29,10 @@ pub const PILL_HEIGHT: f32 = 20.0;
 pub const PILL_LEFT: f32 = ROW_LEFT + 8.0;
 pub const PILL_WIDTH: f32 = ROW_WIDTH - 16.0;
 pub const PILL_GAP: f32 = 4.0;
+/// From one line of pills to the next, on cards with two lines.
+pub const PILL_LINE: f32 = PILL_HEIGHT + PILL_GAP;
+/// Settings with this many choices or more put their pills on two lines, so long names fit.
+pub const TWO_LINE_CHOICES: usize = 5;
 /// The minus and plus buttons on either end of a number's slider.
 pub const STEP_WIDTH: f32 = 34.0;
 
@@ -56,9 +63,32 @@ impl Layout {
         self.height + self.gap
     }
 
-    /// The top of the row in this visible slot.
+    /// The top of the row in this visible slot, when every row is the usual height.
     pub fn top(self, slot: usize) -> f32 {
         ROW_TOP + slot as f32 * self.pitch()
+    }
+
+    /// Each row's top before scrolling, given each row's height.
+    pub fn tops(self, heights: &[f32]) -> Vec<f32> {
+        let mut y = ROW_TOP;
+        heights
+            .iter()
+            .map(|height| {
+                let top = y;
+                y += height + self.gap;
+                top
+            })
+            .collect()
+    }
+
+    /// The height of all the rows together, gaps included.
+    pub fn content_height(self, heights: &[f32]) -> f32 {
+        heights.iter().sum::<f32>() + self.gap * heights.len().saturating_sub(1) as f32
+    }
+
+    /// The furthest the list scrolls: far enough to show the last row whole.
+    pub fn most_scroll(self, heights: &[f32]) -> f32 {
+        (ROW_TOP + self.content_height(heights) - VIEW_BOTTOM).max(0.0)
     }
 }
 
@@ -73,6 +103,31 @@ pub enum Pills {
 pub fn pill_spans(count: usize) -> impl Iterator<Item = (f32, f32)> {
     let width = (PILL_WIDTH - PILL_GAP * count.saturating_sub(1) as f32) / count.max(1) as f32;
     (0..count).map(move |index| (PILL_LEFT + index as f32 * (width + PILL_GAP), width))
+}
+
+/// How many lines of pills a setting's choices take.
+pub fn pill_lines(count: usize) -> usize {
+    if count >= TWO_LINE_CHOICES { 2 } else { 1 }
+}
+
+/// Each of `count` pills as (left, top, width), with top measured from the first line of pills.
+/// On two lines, the first line holds the extra pill when the count is odd.
+pub fn pill_boxes(count: usize) -> Vec<(f32, f32, f32)> {
+    let first = if pill_lines(count) == 2 { count.div_ceil(2) } else { count };
+    pill_spans(first)
+        .map(|(left, width)| (left, 0.0, width))
+        .chain(pill_spans(count - first).map(|(left, width)| (left, PILL_LINE, width)))
+        .collect()
+}
+
+impl Pills {
+    /// How many lines of pills these take on a card.
+    pub fn lines(&self) -> usize {
+        match self {
+            Pills::Choices { names, .. } => pill_lines(names.len()),
+            Pills::Number { .. } => 1,
+        }
+    }
 }
 
 /// The left edges of a number's minus and plus buttons.
@@ -112,6 +167,23 @@ pub struct Input {
     pub touch: Option<(f32, f32)>,
 }
 
+/// A menu sound effect. The menu picks one per update and the app plays it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// Focus moved to another row.
+    Hover,
+    /// A value changed: a rule, an Archipelago option, a mod or a look.
+    Choose,
+    /// A row did something: opened a page, the keyboard, or a log.
+    Select,
+    /// L or R switched to the next page of the same list.
+    PageChange,
+    /// A page closed.
+    Back,
+    /// Building a seed or patching from Archipelago started.
+    Start,
+}
+
 /// What the app must do after an update.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -145,6 +217,8 @@ pub enum Action {
     StartSharing,
     /// Open the keyboard for the Archipelago player name, then call `set_player_name`.
     EditPlayerName,
+    /// Start the installed game with the plugin that copies its files to the SD card.
+    CopyGameFiles,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,7 +233,6 @@ pub enum Page {
     /// Asks whether to replace the preset that already has the chosen name.
     ReplacePreset,
     Mods,
-    Display,
     Confirm,
     Message,
     About,
@@ -246,7 +319,6 @@ enum Target {
     Option(usize),
     Preset(usize),
     Mod(ModKind),
-    Display(display::Setting),
     SavePreset,
     ReplacePreset,
     EditSeed,
@@ -266,6 +338,7 @@ enum Target {
     ApDefaults,
     Look(Look),
     ApplyPatch,
+    CopyGameFiles,
     /// A spoiler entry, or a row that does nothing.
     Nothing,
 }
@@ -290,7 +363,8 @@ struct Row {
 struct Place {
     page: Page,
     focus: usize,
-    scroll: usize,
+    /// How far the list is scrolled, in pixels.
+    scroll: f32,
 }
 
 /// One row for the app to draw.
@@ -305,6 +379,9 @@ pub struct RowView {
     pub icon: Option<&'static str>,
     /// On rules pages, the setting's choices.
     pub pills: Option<Pills>,
+    /// Where the row's top is, and how tall it is. Cards with two lines of pills are taller.
+    pub top: f32,
+    pub height: f32,
 }
 
 /// Everything the app needs to draw a frame.
@@ -316,9 +393,10 @@ pub struct View {
     pub body: Vec<String>,
     pub rows: Vec<RowView>,
     pub hint: String,
-    /// Scroll position and total rows, for the scroll bar.
-    pub scroll: usize,
+    /// Scroll position in pixels, total rows, and the height of all rows, for the scroll bar.
+    pub scroll: f32,
     pub total_rows: usize,
+    pub content_height: f32,
     pub layout: Layout,
 }
 
@@ -327,7 +405,7 @@ struct Touch {
     start: (f32, f32),
     last: (f32, f32),
     dragging: bool,
-    scroll_at_start: usize,
+    scroll_at_start: f32,
 }
 
 pub struct Menu {
@@ -337,8 +415,9 @@ pub struct Menu {
     pub preset_name: String,
     /// Where the game was found, shown on the home page.
     pub game_location: String,
-    /// Text sizes. The app saves them and reloads fonts when they change.
-    pub display: Display,
+    /// True when the game is installed but its files are not on the SD card yet. The home page
+    /// then offers to copy them.
+    pub can_copy_game: bool,
     presets: Vec<Preset>,
     /// True once a rule changes on the rules pages, until the player leaves them.
     rules_changed: bool,
@@ -371,6 +450,10 @@ pub struct Menu {
     message: (String, Vec<String>),
     held_frames: u32,
     touch: Option<Touch>,
+    /// Counts value changes, so an update can tell whether one happened.
+    value_changes: u32,
+    /// The sound for the last update, until the app takes it.
+    sound: Option<Sound>,
 }
 
 /// The About page, one row each: what they did, who they are, and more on the top screen.
@@ -384,6 +467,7 @@ const CREDITS: &[(&str, &str, &str)] = &[
     ("Rust on 3DS", "rust3ds", "ctru-rs and cargo-3ds. github.com/rust3ds"),
     ("Title Font", "Omni Jacala", "Hylia Serif."),
     ("Body Font", "Fontworks", "Reggae One, under the SIL Open Font License 1.1."),
+    ("Sound Effects", "friedspin", "Menu sounds from Cozy UI SFX. friedspin.itch.io"),
     ("Models and Voices", "Their authors", "Each mod belongs to the person who made it."),
     ("The Game", "Nintendo", "The Legend of Zelda: A Link Between Worlds. This app is not made or approved by Nintendo, and it ships no game data."),
 ];
@@ -419,9 +503,9 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 impl Menu {
     /// `old_3ds` starts on a notice about what that console can do.
     pub fn new(seed: u32, presets: Vec<Preset>, old_3ds: bool) -> Self {
-        let mut stack = vec![Place { page: Page::Home, focus: 0, scroll: 0 }];
+        let mut stack = vec![Place { page: Page::Home, focus: 0, scroll: 0.0 }];
         if old_3ds {
-            stack.push(Place { page: Page::OldWarning, focus: 0, scroll: 0 });
+            stack.push(Place { page: Page::OldWarning, focus: 0, scroll: 0.0 });
         }
         Self {
             stack,
@@ -429,7 +513,7 @@ impl Menu {
             seed,
             preset_name: "Standard".to_owned(),
             game_location: String::new(),
-            display: Display::default(),
+            can_copy_game: false,
             presets,
             rules_changed: false,
             replacing: None,
@@ -450,6 +534,8 @@ impl Menu {
             message: (String::new(), Vec::new()),
             held_frames: 0,
             touch: None,
+            value_changes: 0,
+            sound: None,
         }
     }
 
@@ -477,7 +563,7 @@ impl Menu {
 
     pub fn open_category(&mut self, category: usize) {
         if category < CATEGORIES.len() {
-            self.stack.push(Place { page: Page::Options(category), focus: 0, scroll: 0 });
+            self.stack.push(Place { page: Page::Options(category), focus: 0, scroll: 0.0 });
         }
     }
 
@@ -600,6 +686,7 @@ impl Menu {
     fn ap_step(&mut self, index: usize, delta: i32) {
         self.ap_options.step(index, delta);
         self.ap_changed = true;
+        self.value_changes += 1;
     }
 
     pub fn options_file(&self) -> String {
@@ -624,6 +711,12 @@ impl Menu {
     fn step_look(&mut self, look: Look, delta: i32) {
         let choice = &mut self.looks[look as usize];
         *choice = (*choice as i32 + delta).rem_euclid(LOOK_CHOICES.len() as i32) as usize;
+        self.value_changes += 1;
+    }
+
+    fn step_mod(&mut self, kind: ModKind, delta: i32) {
+        self.mod_choice(kind).step(delta);
+        self.value_changes += 1;
     }
 
     /// Opens a spoiler log with every entry showing.
@@ -640,7 +733,7 @@ impl Menu {
         self.found = self.spoiler.search(&self.search);
         let place = self.place_mut();
         place.focus = 0;
-        place.scroll = 0;
+        place.scroll = 0.0;
     }
 
     pub fn search(&self) -> &str {
@@ -665,10 +758,12 @@ impl Menu {
         };
         // The group's first entry goes to the top of the list, where the list is long enough.
         if let Some(slot) = target {
-            let last_top = self.found.len().saturating_sub(Layout::LINES.visible);
+            let layout = Layout::of(self.page());
+            let heights = self.heights(&self.rows());
+            let top = layout.tops(&heights).get(slot).copied().unwrap_or(ROW_TOP);
             let place = self.place_mut();
             place.focus = slot;
-            place.scroll = slot.min(last_top);
+            place.scroll = (top - ROW_TOP).min(layout.most_scroll(&heights));
         }
     }
 
@@ -686,7 +781,8 @@ impl Menu {
     fn open(&mut self, page: Page) {
         // The seed page opens on Start Randomizing, so A then A still makes a seed.
         let focus = if page == Page::Confirm { CONFIRM_START } else { 0 };
-        self.stack.push(Place { page, focus, scroll: 0 });
+        self.stack.push(Place { page, focus, scroll: 0.0 });
+        self.follow_focus();
     }
 
     fn back(&mut self) -> Action {
@@ -727,17 +823,23 @@ impl Menu {
                 row("Continue", None, "", Target::Back),
                 row("Exit", None, "", Target::Exit),
             ],
-            Page::Home => vec![
+            Page::Home => {
+                let mut rows = Vec::new();
+                if self.can_copy_game {
+                    rows.push(row("Copy Game Files", None, "Starts your game once to copy the files the randomizer needs to the SD card, about 300 MB, then comes back here. Needs Luma's plugin loader.", Target::CopyGameFiles));
+                }
+                rows.extend([
                 row("Make a Seed", None, "Pick the seed number, review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
                 row("Rules", None, "Change every option by hand.", Target::Open(Page::Categories)),
                 row("Presets", Some(self.preset_name.clone()), "Load a set of rules, or save your own to share.", Target::Open(Page::Presets)),
                 row("Models and Voices", None, "Choose a player model and voice pack for this seed.", Target::Open(Page::Mods)),
                 row("Spoiler Logs", None, "Stuck? Look up where items are in seeds you made, and search by item or place.", Target::ListSpoilers),
                 row("Archipelago", None, "Play in a multiworld: send your options to the host, then patch your game from their file.", Target::Open(Page::Archipelago)),
-                row("Display", None, "Text sizes for these menus.", Target::Open(Page::Display)),
                 row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
-                row("Exit", None, "Return to the Homebrew Launcher.", Target::Exit),
-            ],
+                row("Exit", None, "Close the app.", Target::Exit),
+                ]);
+                rows
+            }
             Page::Categories => CATEGORIES
                 .iter()
                 .enumerate()
@@ -779,15 +881,6 @@ impl Menu {
                     "Press Y to hear it. Add a mod as /3ds/albw-rando/voices/<name>/romfs. It then appears here.",
                     Target::Mod(ModKind::Voice),
                 ),
-            ],
-            Page::Display => vec![
-                row(
-                    "Text Size",
-                    Some(format!("{} px", self.display.text)),
-                    "Size of the text in rows, hints, and this box.",
-                    Target::Display(display::Setting::Text),
-                ),
-                row("Title Size", Some(format!("{} px", self.display.title)), "Size of page names like the one above.", Target::Display(display::Setting::Title)),
             ],
             Page::Confirm => vec![
                 row("Seed Number", Some(self.seed.to_string()), "The same number and rules make the same game on this console. Press A to type one.", Target::EditSeed),
@@ -886,11 +979,13 @@ impl Menu {
     fn adjust(&mut self, index: usize, delta: i32) {
         self.rules.step(&OPTIONS[index], delta);
         self.mark_changed();
+        self.value_changes += 1;
     }
 
     fn pick(&mut self, index: usize, choice: usize) {
         self.rules.select(&OPTIONS[index], choice);
         self.mark_changed();
+        self.value_changes += 1;
     }
 
     fn mark_changed(&mut self) {
@@ -922,11 +1017,7 @@ impl Menu {
                 self.back()
             }
             Target::Mod(kind) => {
-                self.mod_choice(kind).step(1);
-                Action::None
-            }
-            Target::Display(setting) => {
-                self.display.step(setting, 1);
+                self.step_mod(kind, 1);
                 Action::None
             }
             Target::SavePreset => {
@@ -945,6 +1036,7 @@ impl Menu {
             Target::Generate => Action::Generate,
             Target::Back => self.back(),
             Target::Exit => Action::Exit,
+            Target::CopyGameFiles => Action::CopyGameFiles,
             Target::ListSpoilers => Action::ListSpoilers,
             Target::SpoilerFile(index) => Action::OpenSpoiler(self.spoiler_files[index].clone()),
             Target::ListPatches => Action::ListPatches,
@@ -984,15 +1076,49 @@ impl Menu {
         if count == 0 {
             return;
         }
-        let visible = Layout::of(self.page()).visible;
         let place = self.place_mut();
         place.focus = (place.focus as i32 + delta).rem_euclid(count as i32) as usize;
-        if place.focus < place.scroll {
-            place.scroll = place.focus;
-        } else if place.focus >= place.scroll + visible {
-            place.scroll = place.focus + 1 - visible;
+        self.follow_focus();
+    }
+
+    /// Scrolls just enough to show the focused row whole.
+    fn follow_focus(&mut self) {
+        let layout = Layout::of(self.page());
+        let heights = self.heights(&self.rows());
+        let tops = layout.tops(&heights);
+        let place = self.place_mut();
+        let Some(&top) = tops.get(place.focus) else { return };
+        let top = top - place.scroll;
+        let bottom = top + heights[place.focus];
+        if top < ROW_TOP {
+            place.scroll -= ROW_TOP - top;
+        } else if bottom > VIEW_BOTTOM {
+            place.scroll += bottom - VIEW_BOTTOM;
+        }
+        place.scroll = place.scroll.clamp(0.0, layout.most_scroll(&heights));
+    }
+
+    /// A row's choices, on rules and Archipelago option pages.
+    fn pills_of(&self, row: &Row) -> Option<Pills> {
+        match row.target {
+            Target::Option(option) => Some(self.rules.pills(&OPTIONS[option])),
+            Target::ApOption(option) => Some(self.ap_pills(option)),
+            _ => None,
         }
     }
+
+    /// Each row's height on the current page.
+    fn heights(&self, rows: &[Row]) -> Vec<f32> {
+        let layout = Layout::of(self.page());
+        rows.iter()
+            .map(|row| {
+                let extra = self.pills_of(row).map_or(0, |pills| pills.lines() - 1);
+                layout.height + extra as f32 * PILL_LINE
+            })
+            .collect()
+    }
+
+
 
     /// True on the first frame of a press, then again at a steady rate while held.
     fn repeats(pressed: bool, held: bool, held_frames: u32) -> bool {
@@ -1000,15 +1126,15 @@ impl Menu {
     }
 
     /// The row under a touch, and the touch's height inside that row.
-    fn row_at(place: &Place, count: usize, x: f32, y: f32) -> Option<(usize, f32)> {
+    fn row_at(place: &Place, heights: &[f32], x: f32, y: f32) -> Option<(usize, f32)> {
         let layout = Layout::of(place.page);
-        if !(ROW_LEFT..ROW_LEFT + ROW_WIDTH).contains(&x) || y < ROW_TOP {
+        if !(ROW_LEFT..ROW_LEFT + ROW_WIDTH).contains(&x) || y >= HINT_TOP {
             return None;
         }
-        let slot = ((y - ROW_TOP) / layout.pitch()) as usize;
-        let within = (y - ROW_TOP) % layout.pitch();
-        let index = place.scroll + slot;
-        (slot < layout.visible && within < layout.height && index < count).then_some((index, within))
+        layout.tops(heights).into_iter().zip(heights).enumerate().find_map(|(index, (top, height))| {
+            let top = top - place.scroll;
+            (top..top + height).contains(&y).then_some((index, y - top))
+        })
     }
 
     /// The value a tap on a card's pills picks, if it lands on one.
@@ -1017,13 +1143,16 @@ impl Menu {
     }
 
     fn pick_in(pills: Pills, x: f32, within: f32) -> Option<Pick> {
-        if !(PILL_TOP..PILL_TOP + PILL_HEIGHT).contains(&within) {
-            return None;
-        }
         let hit = |(left, width): (f32, f32)| (left..left + width).contains(&x);
         match pills {
-            Pills::Choices { names, .. } => pill_spans(names.len()).position(hit).map(Pick::Choice),
+            Pills::Choices { names, .. } => pill_boxes(names.len())
+                .into_iter()
+                .position(|(left, top, width)| hit((left, width)) && (PILL_TOP + top..PILL_TOP + top + PILL_HEIGHT).contains(&within))
+                .map(Pick::Choice),
             Pills::Number { .. } => {
+                if !(PILL_TOP..PILL_TOP + PILL_HEIGHT).contains(&within) {
+                    return None;
+                }
                 let [minus, plus] = step_lefts();
                 if hit((minus, STEP_WIDTH)) {
                     Some(Pick::Step(-1))
@@ -1048,11 +1177,18 @@ impl Menu {
                 state.dragging |= moved.abs() >= DRAG_START;
                 if state.dragging {
                     let layout = Layout::of(self.page());
-                    let rows_moved = (moved / layout.pitch()) as i32;
-                    let most = rows.len().saturating_sub(layout.visible) as i32;
+                    let heights = self.heights(rows);
+                    let tops = layout.tops(&heights);
                     let place = self.place_mut();
-                    place.scroll = (state.scroll_at_start as i32 - rows_moved).clamp(0, most) as usize;
-                    place.focus = place.focus.clamp(place.scroll, place.scroll + layout.visible - 1).min(rows.len().saturating_sub(1));
+                    place.scroll = (state.scroll_at_start - moved).clamp(0.0, layout.most_scroll(&heights));
+                    // Keep focus on a row shown whole: the first one if it scrolled off the top,
+                    // the last one if it scrolled off the bottom.
+                    let whole: Vec<usize> = (0..heights.len())
+                        .filter(|&index| tops[index] - place.scroll >= ROW_TOP - 0.5 && tops[index] - place.scroll + heights[index] <= VIEW_BOTTOM + 0.5)
+                        .collect();
+                    if let (Some(&first), Some(&last)) = (whole.first(), whole.last()) {
+                        place.focus = place.focus.clamp(first, last);
+                    }
                 }
                 self.touch = Some(state);
                 Action::None
@@ -1063,10 +1199,11 @@ impl Menu {
                     return Action::None;
                 }
                 let (x, y) = state.last;
-                let Some((index, within)) = Self::row_at(self.place(), rows.len(), x, y) else {
+                let Some((index, within)) = Self::row_at(self.place(), &self.heights(rows), x, y) else {
                     return Action::None;
                 };
                 self.place_mut().focus = index;
+                self.follow_focus();
                 match rows[index].target {
                     // A tap on a pill picks it. A tap anywhere else on the card only focuses it.
                     Target::Option(option) => {
@@ -1091,17 +1228,12 @@ impl Menu {
                     // Left of the value's center steps back, and the rest steps forward.
                     Target::Mod(kind) => {
                         let delta = if (VALUE_LEFT..VALUE_CENTER).contains(&x) { -1 } else { 1 };
-                        self.mod_choice(kind).step(delta);
+                        self.step_mod(kind, delta);
                         Action::None
                     }
                     Target::Look(look) => {
                         let delta = if (VALUE_LEFT..VALUE_CENTER).contains(&x) { -1 } else { 1 };
                         self.step_look(look, delta);
-                        Action::None
-                    }
-                    Target::Display(setting) => {
-                        let delta = if (VALUE_LEFT..VALUE_CENTER).contains(&x) { -1 } else { 1 };
-                        self.display.step(setting, delta);
                         Action::None
                     }
                     target => self.activate(target),
@@ -1111,7 +1243,40 @@ impl Menu {
         }
     }
 
+    /// Handles one frame of input. Afterwards, `take_sound` gives the sound it calls for.
     pub fn update(&mut self, input: Input) -> Action {
+        let before = (self.stack.len(), self.page(), self.place().focus, self.value_changes);
+        let action = self.handle(input);
+        let after = (self.stack.len(), self.page(), self.place().focus, self.value_changes);
+        let sound = if matches!(action, Action::Generate | Action::PatchArchipelago(_)) {
+            Some(Sound::Start)
+        } else if after.0 < before.0 {
+            Some(Sound::Back)
+        } else if after.0 > before.0 {
+            Some(Sound::Select)
+        } else if after.1 != before.1 {
+            Some(Sound::PageChange)
+        } else if after.3 != before.3 {
+            Some(Sound::Choose)
+        } else if action != Action::None {
+            Some(Sound::Select)
+        } else if after.2 != before.2 {
+            Some(Sound::Hover)
+        } else {
+            None
+        };
+        if sound.is_some() {
+            self.sound = sound;
+        }
+        action
+    }
+
+    /// The sound the last updates called for, once.
+    pub fn take_sound(&mut self) -> Option<Sound> {
+        self.sound.take()
+    }
+
+    fn handle(&mut self, input: Input) -> Action {
         let rows = self.rows();
         let count = rows.len();
         let (pressed, held) = (input.pressed, input.held);
@@ -1141,10 +1306,10 @@ impl Menu {
         }
         if let Some(Target::Mod(kind)) = focused {
             if Self::repeats(pressed.left, held.left, frames) {
-                self.mod_choice(kind).step(-1);
+                self.step_mod(kind, -1);
             }
             if Self::repeats(pressed.right, held.right, frames) {
-                self.mod_choice(kind).step(1);
+                self.step_mod(kind, 1);
             }
         }
         if let Some(Target::ApOption(option)) = focused {
@@ -1161,14 +1326,6 @@ impl Menu {
             }
             if Self::repeats(pressed.right, held.right, frames) {
                 self.step_look(look, 1);
-            }
-        }
-        if let Some(Target::Display(setting)) = focused {
-            if Self::repeats(pressed.left, held.left, frames) {
-                self.display.step(setting, -1);
-            }
-            if Self::repeats(pressed.right, held.right, frames) {
-                self.display.step(setting, 1);
             }
         }
         if self.page() == Page::Spoiler {
@@ -1189,7 +1346,7 @@ impl Menu {
             let step = i32::from(pressed.r) - i32::from(pressed.l);
             if step != 0 {
                 let next = (category as i32 + step).rem_euclid(AP_CATEGORIES.len() as i32) as usize;
-                *self.place_mut() = Place { page: Page::ApOptions(next), focus: 0, scroll: 0 };
+                *self.place_mut() = Place { page: Page::ApOptions(next), focus: 0, scroll: 0.0 };
                 return Action::None;
             }
         }
@@ -1197,7 +1354,7 @@ impl Menu {
             let step = i32::from(pressed.r) - i32::from(pressed.l);
             if step != 0 {
                 let next = (category as i32 + step).rem_euclid(CATEGORIES.len() as i32) as usize;
-                *self.place_mut() = Place { page: Page::Options(next), focus: 0, scroll: 0 };
+                *self.place_mut() = Place { page: Page::Options(next), focus: 0, scroll: 0.0 };
                 return Action::None;
             }
         }
@@ -1237,22 +1394,22 @@ impl Menu {
         let focus = place.focus.min(rows.len().saturating_sub(1));
         let help = rows.get(focus).map(|row| row.help.as_str()).unwrap_or("");
         let layout = Layout::of(place.page);
+        let heights = self.heights(&rows);
+        let tops = layout.tops(&heights);
+        // Every row with any part above the hint bar, including ones cut off at either edge.
         let row_views = rows
             .iter()
             .enumerate()
-            .skip(place.scroll)
-            .take(layout.visible)
+            .filter(|&(index, _)| tops[index] - place.scroll < HINT_TOP && tops[index] - place.scroll + heights[index] > 0.0)
             .map(|(index, row)| RowView {
                 label: row.label.clone(),
                 value: row.value.clone(),
                 focused: index == focus,
-                adjustable: matches!(row.target, Target::Option(_) | Target::ApOption(_) | Target::Mod(_) | Target::Look(_) | Target::Display(_)),
+                adjustable: matches!(row.target, Target::Option(_) | Target::ApOption(_) | Target::Mod(_) | Target::Look(_)),
                 icon: row.icon,
-                pills: match row.target {
-                    Target::Option(option) => Some(self.rules.pills(&OPTIONS[option])),
-                    Target::ApOption(option) => Some(self.ap_pills(option)),
-                    _ => None,
-                },
+                pills: self.pills_of(row),
+                top: tops[index] - place.scroll,
+                height: heights[index],
             })
             .collect();
 
@@ -1294,7 +1451,6 @@ impl Menu {
                 };
                 ("Replace Preset?".to_owned(), String::new(), paragraph(&text), "A Select   B Cancel")
             }
-            Page::Display => ("Display".to_owned(), String::new(), paragraph(help), "Left/Right Change   B Back"),
             Page::Mods => (
                 "Models and Voices".to_owned(),
                 "Mods keep their authors' credit".to_owned(),
@@ -1387,6 +1543,7 @@ impl Menu {
             hint: hint.to_owned(),
             scroll: place.scroll,
             total_rows: rows.len(),
+            content_height: layout.content_height(&heights),
             layout,
         }
     }
@@ -1422,9 +1579,9 @@ mod tests {
     }
 
     /// The middle of a pill on a rules card, as (x, y).
-    fn pill(slot: usize, choice: usize, count: usize) -> (f32, f32) {
-        let (left, width) = pill_spans(count).nth(choice).unwrap();
-        (left + width / 2.0, Layout::CARDS.top(slot) + PILL_TOP + PILL_HEIGHT / 2.0)
+    fn pill(menu: &Menu, slot: usize, choice: usize, count: usize) -> (f32, f32) {
+        let (left, top, width) = pill_boxes(count)[choice];
+        (left + width / 2.0, menu.view().rows[slot].top + PILL_TOP + top + PILL_HEIGHT / 2.0)
     }
 
     #[test]
@@ -1462,14 +1619,40 @@ mod tests {
     #[test]
     fn long_lists_scroll_to_keep_focus_visible() {
         let mut menu = menu();
-        // Exit is the ninth Home row, and five rows fit, so the list scrolls by four.
-        for _ in 0..8 {
+        // Exit is the eighth Home row, below the screen until the list scrolls.
+        for _ in 0..7 {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }
         let view = menu.view();
-        assert_eq!(view.scroll, 4);
-        assert!(view.rows.iter().any(|row| row.focused && row.label == "Exit"));
+        assert!(view.scroll > 0.0);
+        let exit = view.rows.iter().find(|row| row.focused).unwrap();
+        assert_eq!(exit.label, "Exit");
+        assert!(exit.top >= ROW_TOP && exit.top + exit.height <= VIEW_BOTTOM);
+    }
+
+    #[test]
+    fn updates_call_for_the_right_sounds() {
+        let mut menu = menu();
+        press(&mut menu, |b| b.down = true);
+        assert_eq!(menu.take_sound(), Some(Sound::Hover));
+        assert_eq!(menu.take_sound(), None);
+        release(&mut menu);
+        press(&mut menu, |b| b.a = true);
+        assert_eq!(menu.take_sound(), Some(Sound::Select));
+        release(&mut menu);
+        // The first rules category, then its first option.
+        press(&mut menu, |b| b.a = true);
+        release(&mut menu);
+        menu.take_sound();
+        press(&mut menu, |b| b.right = true);
+        assert_eq!(menu.take_sound(), Some(Sound::Choose));
+        release(&mut menu);
+        press(&mut menu, |b| b.r = true);
+        assert_eq!(menu.take_sound(), Some(Sound::PageChange));
+        release(&mut menu);
+        press(&mut menu, |b| b.b = true);
+        assert_eq!(menu.take_sound(), Some(Sound::Back));
     }
 
     #[test]
@@ -1523,13 +1706,14 @@ mod tests {
         let value = |menu: &Menu| menu.view().rows[0].value.clone().unwrap();
         assert_eq!(value(&menu), "Normal");
         // Logic has six choices. The fourth is Adv. Glitched.
-        let (x, y) = pill(0, 3, 6);
+        let (x, y) = pill(&menu, 0, 3, 6);
         tap(&mut menu, x, y);
         assert_eq!(value(&menu), "Adv. Glitched");
         assert_eq!(menu.preset_name, "Custom");
         // The card's name line only focuses it.
         let before = menu.view().rows[1].value.clone();
-        tap(&mut menu, x, Layout::CARDS.top(1) + 10.0);
+        let name_line = menu.view().rows[1].top + 10.0;
+        tap(&mut menu, x, name_line);
         assert!(menu.view().rows[1].focused);
         assert_eq!(menu.view().rows[1].value, before);
     }
@@ -1544,9 +1728,10 @@ mod tests {
             release(&mut menu);
         }
         let view = menu.view();
-        assert_eq!(view.scroll, 1);
-        assert_eq!(view.rows[2].pills, Some(Pills::Choices { names: vec!["Off".into(), "On".into()], selected: 0 }));
-        let (x, y) = pill(2, 1, 2);
+        assert!(view.scroll > 0.0);
+        let slot = view.rows.iter().position(|row| row.focused).unwrap();
+        assert_eq!(view.rows[slot].pills, Some(Pills::Choices { names: vec!["Off".into(), "On".into()], selected: 0 }));
+        let (x, y) = pill(&menu, slot, 1, 2);
         tap(&mut menu, x, y);
         assert!(menu.rules.settings().swordless_mode);
         // Maiamai Limit's plus button adds one step.
@@ -1555,9 +1740,11 @@ mod tests {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }
-        let before = menu.view().rows[2].value.clone().unwrap().parse::<i64>().unwrap();
-        tap(&mut menu, step_lefts()[1] + 4.0, Layout::CARDS.top(2) + PILL_TOP + 4.0);
-        let after = menu.view().rows[2].value.clone().unwrap().parse::<i64>().unwrap();
+        let focused = |menu: &Menu| menu.view().rows.into_iter().find(|row| row.focused).unwrap();
+        let before = focused(&menu).value.unwrap().parse::<i64>().unwrap();
+        let plus = focused(&menu).top + PILL_TOP + 4.0;
+        tap(&mut menu, step_lefts()[1] + 4.0, plus);
+        let after = focused(&menu).value.unwrap().parse::<i64>().unwrap();
         assert_eq!(after, before + 5);
     }
 
@@ -1575,7 +1762,9 @@ mod tests {
         release(&mut menu);
         assert_eq!(menu.view().rows[0].value.as_deref(), Some("Normal"));
         assert_eq!(menu.view().layout, Layout::CARDS);
-        assert_eq!(menu.view().rows.len(), VISIBLE_CARDS);
+        // Logic's pills take two lines, so its card is taller and the third card shows cut off.
+        assert_eq!(menu.view().rows[0].height, CARD_HEIGHT + PILL_LINE);
+        assert_eq!(menu.view().rows.len(), 3);
     }
 
     #[test]
@@ -1586,7 +1775,26 @@ mod tests {
         drag(&mut menu, 100.0);
         release(&mut menu);
         assert_eq!(menu.page(), Page::Home);
-        assert_eq!(menu.view().scroll, 1);
+        // The list follows the finger by the pixel.
+        assert_eq!(menu.view().scroll, 50.0);
+    }
+
+    #[test]
+    fn cards_below_show_cut_off_and_taps_on_them_scroll_them_in() {
+        let mut menu = menu();
+        // Logic's card is tall, so the third card on the page is only partly shown.
+        menu.open(Page::Options(0));
+        let view = menu.view();
+        let last = view.rows.last().unwrap();
+        assert_eq!(view.rows.len(), 3);
+        assert!(last.top < HINT_TOP && last.top + last.height > VIEW_BOTTOM);
+        tap(&mut menu, 100.0, last.top + 8.0);
+        let view = menu.view();
+        let focused = view.rows.iter().find(|row| row.focused).unwrap();
+        assert_eq!(focused.label, last.label);
+        assert!(focused.top + focused.height <= VIEW_BOTTOM);
+        // Nothing under the hint bar can be tapped.
+        assert!(Menu::row_at(menu.place(), &menu.heights(&menu.rows()), 100.0, HINT_TOP + 2.0).is_none());
     }
 
     #[test]
@@ -1629,7 +1837,7 @@ mod tests {
         let mut menu = menu();
         menu.open(Page::Categories);
         menu.open(Page::Options(0));
-        let (x, y) = pill(0, 1, 6);
+        let (x, y) = pill(&menu, 0, 1, 6);
         tap(&mut menu, x, y);
         press(&mut menu, |b| b.b = true);
         release(&mut menu);
@@ -1656,7 +1864,7 @@ mod tests {
         // Changing a rule, then loading a preset, leaves nothing new to save.
         menu.open(Page::Categories);
         menu.open(Page::Options(0));
-        let (x, y) = pill(0, 1, 6);
+        let (x, y) = pill(&menu, 0, 1, 6);
         tap(&mut menu, x, y);
         menu.select_preset("Casual");
         menu.back();
@@ -1813,7 +2021,7 @@ mod tests {
             release(&mut menu);
         }
         let view = menu.view();
-        assert!(view.scroll > 0);
+        assert!(view.scroll > 0.0);
         assert!(view.body.iter().any(|line| line == "Nintendo"));
     }
 

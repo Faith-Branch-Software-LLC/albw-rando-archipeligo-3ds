@@ -12,3 +12,12 @@
 # Modules from other systems, joined by the release workflow.
 /apworld/prebuilt/
 __pycache__/
+# Menu sounds by friedspin. Their license allows them inside the built app but forbids sharing
+# the raw files, so they never go in the repo. Builds without them are silent.
+/crates/app-3ds/sounds/
+# Personal Claude Code settings.
+.claude/settings.local.json
+# makerom and bannertool for tools/build-cia.sh, downloaded per machine.
+/tools/bin/
+# Affinity lock files, made while a file is open.
+*~lock~

@@ -22,13 +22,20 @@
   #status { min-height: 1.5em; margin-top: 10px; }
   .good { color: var(--good); } .bad { color: var(--bad); }
   code { color: var(--ink); }
-  footer { color: var(--muted); font-size: 13px; margin-top: 20px; }
+  #update { border: 1px solid var(--gold); }
 </style>
 </head>
 <body>
 <main>
   <h1>ALBW Randomizer 3DS</h1>
   <p class="sub">Connected to <span id="player">your 3DS</span>'s console. <span id="live"></span></p>
+
+  <section id="update" hidden>
+    <h2>Update available</h2>
+    <p>Version <span id="update-version"></span> is out. This 3DS has <span id="app-version"></span>.
+      Get the new release from GitHub, then copy its files to your SD card.</p>
+    <a class="button" id="update-link" target="_blank" rel="noopener">Open the release on GitHub</a>
+  </section>
 
   <section>
     <h2>1. Your options</h2>
@@ -39,7 +46,7 @@
   <section>
     <h2>2. The apworld, for the host</h2>
     <p>The host puts this in <code>Archipelago/custom_worlds/</code> so the game is "A Link Between Worlds - 3DS".</p>
-    <a class="button" id="apworld" href="/albw_3ds.apworld">Download apworld</a>
+    <a class="button" id="apworld" href="/albw_3ds.apworld" rel="noopener">Download apworld</a>
     <p id="apworld-note"></p>
     <p id="apworld-keep" hidden>To keep a copy on the 3DS for next time, drop the downloaded <code>albw_3ds.apworld</code> in step 3.</p>
   </section>
@@ -50,8 +57,6 @@
     <div id="drop">Drop the file here, or <label><u>choose it</u><input id="file" type="file" accept=".apalbw3ds,.apworld" hidden></label></div>
     <div id="status"></div>
   </section>
-
-  <footer>Made by Faith Branch Software LLC. The Archipelago world is based on randomsalience's albw-archipelago.</footer>
 </main>
 <script>
   const statusLine = document.getElementById("status");
@@ -85,10 +90,13 @@
 
   function show(state) {
     if (state.player) document.getElementById("player").textContent = state.player;
+    checkForUpdate(state);
     const link = document.getElementById("apworld");
     const here = state.apworld && state.apworld === state.needs;
     link.href = here ? "/albw_3ds.apworld" : state.download;
     link.textContent = here ? "Download apworld" : "Download apworld from GitHub";
+    // GitHub opens in a new tab, so this page stays open for step 3.
+    if (here) link.removeAttribute("target"); else link.target = "_blank";
     document.getElementById("apworld-keep").hidden = here;
     document.getElementById("apworld-note").textContent = here ? "Version " + state.apworld + "."
       : state.apworld ? "This 3DS has apworld " + state.apworld + ", but the app needs " + state.needs + ". Get it from GitHub instead."
@@ -105,6 +113,34 @@
   async function poll() {
     try { show(await (await fetch("/status")).json()); } catch (err) {}
   }
+  // Versions as numbers, so 0.10.0 is newer than 0.9.0. A leading "v" is ignored.
+  function parts(version) { return String(version).replace(/^v/, "").split(".").map((part) => parseInt(part, 10) || 0); }
+  function newer(a, b) {
+    const x = parts(a), y = parts(b);
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+    }
+    return false;
+  }
+
+  // The computer asks GitHub for the newest release. The 3DS cannot reach GitHub itself. Without
+  // internet on the computer, nothing shows.
+  let checked = false;
+  async function checkForUpdate(state) {
+    if (checked || !state.app || !state.repository) return;
+    checked = true;
+    try {
+      const reply = await fetch("https://api.github.com/repos/" + state.repository + "/releases/latest", { headers: { Accept: "application/vnd.github+json" } });
+      if (!reply.ok) return;
+      const release = await reply.json();
+      if (!release.tag_name || !newer(release.tag_name, state.app)) return;
+      document.getElementById("update-version").textContent = release.tag_name.replace(/^v/, "");
+      document.getElementById("app-version").textContent = state.app;
+      document.getElementById("update-link").href = release.html_url;
+      document.getElementById("update").hidden = false;
+    } catch (err) {}
+  }
+
   poll();
   connect();
 </script>

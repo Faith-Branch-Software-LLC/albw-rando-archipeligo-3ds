@@ -22,7 +22,16 @@ const LOG: &str = "sdmc:/3ds/albw-rando/last-run.log";
 pub const TEST_PAGE: &str = "sdmc:/3ds/albw-rando/test-page.txt";
 /// What the startup check for the game found.
 pub const CHECK_LOG: &str = "sdmc:/3ds/albw-rando/game-check.log";
+/// What the app did to start copying the game files.
+pub const COPY_LOG: &str = "sdmc:/3ds/albw-rando/game-copy.log";
 const IMAGE: &str = "sdmc:/3ds/albw-rando/game.cci";
+/// The game files that the plugin copied from the installed game or game card. The folder holds
+/// `romfs/`, `exheader.bin`, and `done.txt`, which the plugin writes last.
+const GAME_COPY: &str = "sdmc:/3ds/albw-rando/game";
+/// Where the app saves the plugin for Luma to load, as Luma names SD card paths.
+const PLUGIN_FILE: &str = "/3ds/albw-rando/albw-files.3gx";
+/// This app's title ID when installed as a CIA.
+const APP_TITLE_ID: u64 = 0x0004_0000_0FA1_B000;
 const EXHEADER: &str = "sdmc:/3ds/albw-rando/exheader.bin";
 const BUILD_DIR: &str = "sdmc:/3ds/albw-rando/build";
 const SPILL_DIR: &str = "sdmc:/3ds/albw-rando/tmp";
@@ -210,13 +219,23 @@ enum Location {
 }
 
 enum Source {
-    Mounted(Vec<u8>),
+    /// A RomFS folder, either mounted from the game or the plugin's copy, with the exheader.
+    Mounted { root: String, exheader: Vec<u8> },
     Image,
+}
+
+impl Source {
+    fn is_romfs_mount(&self) -> bool {
+        matches!(self, Source::Mounted { root, .. } if root.starts_with(MOUNT))
+    }
 }
 
 /// What the check for the game found.
 pub struct GameCheck {
     source: Option<(Location, Source)>,
+    /// Where the game is installed or inserted when its files are not on the SD card yet, so the
+    /// plugin can copy them.
+    pub copy_from: Option<ctru_sys::FS_MediaType>,
     /// A short description for the home page.
     pub summary: String,
     /// Result codes, for the logs.
@@ -246,11 +265,37 @@ fn title_present(media: ctru_sys::FS_MediaType) -> Result<bool, i32> {
     }
 }
 
-/// Looks for the game on this console, then on the game card, then in the app's folder.
+/// Reads the plugin's copy of the game files, if it finished. `Err` says why it can't be used.
+fn read_copy() -> Result<Option<Vec<u8>>, String> {
+    if !Path::new(&format!("{GAME_COPY}/done.txt")).exists() {
+        return Ok(None);
+    }
+    let exheader = fs::read(format!("{GAME_COPY}/exheader.bin")).map_err(|err| format!("no exheader.bin: {err}"))?;
+    if exheader.len() != 0x400 || exheader[0x200..0x208] != TITLE_ID.to_le_bytes() {
+        return Err("exheader.bin is not this game's".to_owned());
+    }
+    Ok(Some(exheader))
+}
+
+/// Looks for the game files copied to the SD card, then on this console, then on the game card,
+/// then in the app's folder.
 pub fn check_game() -> GameCheck {
     let name = CString::new(MOUNT).expect("name has no zero byte");
     let mut details = Vec::new();
+    match read_copy() {
+        Ok(Some(exheader)) => {
+            return GameCheck {
+                source: Some((Location::Folder, Source::Mounted { root: format!("{GAME_COPY}/romfs/"), exheader })),
+                copy_from: None,
+                summary: "Game: files copied from your game.".to_owned(),
+                details: vec![format!("Using the game files in {GAME_COPY}.")],
+            };
+        }
+        Ok(None) => details.push(format!("No game files in {GAME_COPY}.")),
+        Err(err) => details.push(format!("The game files in {GAME_COPY} can't be used: {err}")),
+    }
     let mut unreadable = Vec::new();
+    let mut copy_from = None;
     for (label, place, location, media) in [
         ("installed", "installed on this 3DS", Location::Installed, ctru_sys::MEDIATYPE_SD),
         ("game card", "the game card", Location::Card, ctru_sys::MEDIATYPE_GAME_CARD),
@@ -272,7 +317,8 @@ pub fn check_game() -> GameCheck {
             match fs::read(EXHEADER) {
                 Ok(exheader) => {
                     return GameCheck {
-                        source: Some((location, Source::Mounted(exheader))),
+                        source: Some((location, Source::Mounted { root: format!("{MOUNT}:/"), exheader })),
+                        copy_from: None,
                         summary: format!("Game: {place}."),
                         details,
                     };
@@ -287,29 +333,35 @@ pub fn check_game() -> GameCheck {
         }
         if present {
             unreadable.push(place);
+            copy_from.get_or_insert(media);
         }
     }
-    let note = unreadable.first().map_or(String::new(), |place| format!(" Found on {place}, but this app can't read it yet."));
+    // The 3DS only lets a program open its own title's files (0xD9004676, "command not allowed"),
+    // even with every file system permission, so an installed game is found but not read. The
+    // plugin copies the files from inside the game instead.
     if Path::new(IMAGE).exists() {
+        let note = unreadable.first().map_or(String::new(), |place| format!(" It is also {place}."));
         return GameCheck {
             source: Some((Location::Folder, Source::Image)),
+            copy_from,
             summary: format!("Game: backup copy, /3ds/albw-rando/game.cci.{note}"),
             details,
         };
     }
-    let summary = format!("Game not found.{note} Copy your decrypted USA game to /3ds/albw-rando/game.cci on the SD card.");
-    GameCheck { source: None, summary, details }
+    let summary = match unreadable.first() {
+        Some(place) => format!("Game: {place}. Choose Copy Game Files once so the randomizer can read it."),
+        None => "Game not found. Install A Link Between Worlds (USA) or insert the game card.".to_owned(),
+    };
+    GameCheck { source: None, copy_from, summary, details }
 }
 
 /// Reads archives from the game, to pick images from them. This ends the check.
 pub fn game_archives(check: GameCheck, names: &[&str]) -> Result<Vec<Vec<u8>>, String> {
     let archive = |name: &&str| format!("Archive/{name}");
-    match check.source {
-        Some((_, Source::Mounted(_))) => {
-            let archives = names.iter().map(|name| fs::read(format!("{MOUNT}:/{}", archive(name))).map_err(|err| err.to_string())).collect();
-            let mount = CString::new(MOUNT).expect("name has no zero byte");
-            // SAFETY: `mount` outlives the call. This undoes the mount that `check_game` made.
-            let _ = unsafe { ctru_sys::romfsUnmount(mount.as_ptr()) };
+    match &check.source {
+        Some((_, Source::Mounted { root, .. })) => {
+            let archives = names.iter().map(|name| fs::read(format!("{root}{}", archive(name))).map_err(|err| err.to_string())).collect();
+            finish_check(check);
             archives
         }
         Some((_, Source::Image)) => {
@@ -336,7 +388,7 @@ impl ui_core::csar::ReadAt for RomFile<'_> {
 pub fn game_voice_clips(names: &[&str]) -> Result<(Vec<ui_core::csar::Clip>, Vec<String>), String> {
     let check = check_game();
     let clips = match &check.source {
-        Some((_, Source::Mounted(_))) => fs::File::open(format!("{MOUNT}:/{SOUND_ARCHIVE}"))
+        Some((_, Source::Mounted { root, .. })) => fs::File::open(format!("{root}{SOUND_ARCHIVE}"))
             .map_err(|err| err.to_string())
             .and_then(|file| ui_core::csar::read_clips(&mut ui_core::csar::Seekable(file), names)),
         Some((_, Source::Image)) => rom::Rom::load(IMAGE)
@@ -357,7 +409,7 @@ pub fn mod_voice_clips(name: &str, names: &[&str]) -> Result<(Vec<ui_core::csar:
 
 /// Lets the next check mount the game again.
 pub fn finish_check(check: GameCheck) {
-    if matches!(check.source, Some((_, Source::Mounted(_)))) {
+    if check.source.as_ref().is_some_and(|(_, source)| source.is_romfs_mount()) {
         let mount = CString::new(MOUNT).expect("name has no zero byte");
         // SAFETY: `mount` outlives the call. This undoes the mount that `check_game` made.
         let _ = unsafe { ctru_sys::romfsUnmount(mount.as_ptr()) };
@@ -379,7 +431,7 @@ fn find_game() -> Result<Source, String> {
 
 fn load_game(source: Source) -> Result<rom::Rom, String> {
     match source {
-        Source::Mounted(exheader) => rom::Rom::load_mounted(format!("{MOUNT}:/"), &exheader).map_err(|err| err.to_string()),
+        Source::Mounted { root, exheader } => rom::Rom::load_mounted(root, &exheader).map_err(|err| err.to_string()),
         Source::Image => rom::Rom::load(IMAGE).map_err(|err| err.to_string()),
     }
 }
@@ -578,4 +630,105 @@ pub extern "C" fn worker(_: *mut core::ffi::c_void) {
     }
     let _ = fs::remove_dir_all(SPILL_DIR);
     progress::finish();
+}
+
+include!(concat!(env!("OUT_DIR"), "/plugin.rs"));
+
+/// The plugin's request, which Luma passes to it in the plugin header's config words. The plugin
+/// (`plugin/main.c`) reads the same layout.
+const PLUGIN_REQUEST_MAGIC: u32 = 0x5742_4C41; // "ALBW"
+const PLUGIN_REQUEST_VERSION: u32 = 1;
+
+/// Sends one request to a service session. `words` fills the command buffer from the header on.
+/// Returns the reply's result code and the command buffer.
+///
+/// # Safety
+///
+/// Any buffer descriptors in `words` must point at memory that outlives the call.
+unsafe fn request(session: ctru_sys::Handle, words: &[u32]) -> (i32, [u32; 8]) {
+    // SAFETY: The command buffer belongs to this thread and holds 64 words.
+    unsafe {
+        let command = ctru_sys::getThreadCommandBuffer();
+        for (at, word) in words.iter().enumerate() {
+            *command.add(at) = *word;
+        }
+        let mut result = ctru_sys::svcSendSyncRequest(session);
+        if result >= 0 {
+            result = *command.add(1) as i32;
+        }
+        let mut reply = [0u32; 8];
+        for (at, word) in reply.iter_mut().enumerate() {
+            *word = *command.add(at);
+        }
+        (result, reply)
+    }
+}
+
+/// Sets up Luma to load the game files plugin the next time the game starts, then asks the
+/// system to start the game when the app closes. The plugin copies the files to `GAME_COPY` and
+/// comes back to the app. Returns what happened, for the log.
+pub fn start_copy(media: ctru_sys::FS_MediaType) -> Result<Vec<String>, String> {
+    use ctru_sys as sys;
+    let mut details = Vec::new();
+    fs::create_dir_all(APP_DIR).map_err(|err| format!("Could not make the app's folder: {err}"))?;
+    fs::write(format!("sdmc:{PLUGIN_FILE}"), PLUGIN).map_err(|err| format!("Could not save the plugin to the SD card: {err}"))?;
+
+    let port = CString::new("plg:ldr").expect("no zero byte");
+    let mut session: sys::Handle = 0;
+    // SAFETY: The name outlives the call. The session is closed below.
+    let result = unsafe { sys::svcConnectToPort(&mut session, port.as_ptr()) };
+    if result < 0 {
+        return Err(format!("Luma's plugin loader isn't running (0x{:08X}). Update Luma3DS to version 13 or newer.", result as u32));
+    }
+    let outcome = (|| {
+        // SAFETY: These requests carry no buffers.
+        let (result, reply) = unsafe { request(session, &[0x0002_0000]) };
+        if result < 0 {
+            return Err(format!("Could not ask whether the plugin loader is on (0x{:08X}).", result as u32));
+        }
+        if reply[2] == 0 {
+            // SAFETY: As above.
+            let (result, _) = unsafe { request(session, &[0x0003_0040, 1]) };
+            if result < 0 {
+                return Err(format!("Could not turn on Luma's plugin loader (0x{:08X}).", result as u32));
+            }
+            details.push("Turned on Luma's plugin loader.".to_owned());
+        }
+        let mut path = [0u8; 256];
+        path[..PLUGIN_FILE.len()].copy_from_slice(PLUGIN_FILE.as_bytes());
+        // SAFETY: Reads a value libctru sets at startup.
+        let return_to = if unsafe { sys::envIsHomebrew() } { 0 } else { APP_TITLE_ID };
+        let mut config = [0u32; 32];
+        config[..5].copy_from_slice(&[PLUGIN_REQUEST_MAGIC, PLUGIN_REQUEST_VERSION, return_to as u32, (return_to >> 32) as u32, u32::from(sys::MEDIATYPE_SD)]);
+        // No flash, no memory swapping, not kept after one launch, only for this game.
+        let words = [0x0004_0084, 1 | (2 << 8), TITLE_ID as u32, (256 << 4) | 0xA, path.as_ptr() as u32, (128 << 4) | 0xA, config.as_ptr() as u32];
+        // SAFETY: `path` and `config` outlive the request.
+        let (result, _) = unsafe { request(session, &words) };
+        if result < 0 {
+            return Err(format!("Could not tell Luma to load the plugin (0x{:08X}).", result as u32));
+        }
+        details.push(format!("Plugin set for the next launch, coming back to {return_to:016X}."));
+        Ok(())
+    })();
+    // SAFETY: The session is open.
+    let _ = unsafe { sys::svcCloseHandle(session) };
+    outcome?;
+
+    // Start the game without an active seed or mod, so the plugin saves the original header.
+    let name = CString::new("Loader").expect("no zero byte");
+    let mut loader: sys::Handle = 0;
+    // SAFETY: The name outlives the call, and the session is closed below.
+    let result = unsafe { sys::srvGetServiceHandle(&mut loader, name.as_ptr()) };
+    if result >= 0 {
+        // SAFETY: The request carries no buffers. The session is open.
+        let (result, _) = unsafe { request(loader, &[0x0100_0000]) };
+        // SAFETY: The session is open.
+        let _ = unsafe { sys::svcCloseHandle(loader) };
+        details.push(format!("Turned off game patching for one launch: 0x{:08X}", result as u32));
+    } else {
+        details.push(format!("No Luma loader service: 0x{:08X}", result as u32));
+    }
+    // SAFETY: Takes effect when the app closes.
+    unsafe { sys::aptSetChainloader(TITLE_ID, media as u8) };
+    Ok(details)
 }

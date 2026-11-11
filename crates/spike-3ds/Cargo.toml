@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Measures randomizer time and memory on 3DS hardware"
-authors = ["Sebastian Neiswanger"]
+authors = ["Faith Branch Software LLC"]
 
 [[bin]]
 name = "albw-spike"

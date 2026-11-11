@@ -26,6 +26,13 @@ const MDNS_PORT: u16 = 5353;
 const MOST_UPLOAD: usize = 32 * 1024 * 1024;
 /// How much one connection reads in a frame, so a large upload does not stall the screen.
 const MOST_READ_PER_FRAME: usize = 512 * 1024;
+/// While a request is arriving, keep reading for this long each frame instead of stopping at the
+/// first empty read. Reading only once a frame let each frame take in just one small buffer's
+/// worth, which made a few megabytes take minutes.
+const UPLOAD_TIME_PER_FRAME: std::time::Duration = std::time::Duration::from_millis(10);
+/// A larger receive buffer lets the computer send more before waiting for the 3DS. ftpd uses the
+/// same size on the 3DS.
+const RECEIVE_BUFFER: libc::c_int = 32 * 1024;
 /// Where releases are published.
 pub const REPOSITORY: &str = "Faith-Branch-Software-LLC/albw-rando-archipeligo-3ds";
 const CHUNK: usize = 16 * 1024;
@@ -71,6 +78,8 @@ struct Connection {
     stream: TcpStream,
     state: State,
     idle: u32,
+    /// When the connection opened, to log how long uploads take.
+    opened: std::time::Instant,
 }
 
 pub struct Share {
@@ -98,6 +107,8 @@ fn status_json(content: &Content) -> String {
         "apworld": content.apworld,
         "needs": ap_patch::apworld_version_needed(),
         "download": release_link(),
+        "app": env!("CARGO_PKG_VERSION"),
+        "repository": REPOSITORY,
     })
     .to_string()
 }
@@ -200,7 +211,8 @@ impl Share {
                     }
                 }
             }
-            self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0 });
+            set_receive_buffer(&stream);
+            self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0, opened: std::time::Instant::now() });
         }
 
         let status = status_json(content);
@@ -232,6 +244,7 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
             State::Reading(buffer) => {
                 let mut chunk = vec![0u8; CHUNK];
                 let mut read = 0;
+                let started = std::time::Instant::now();
                 while read < MOST_READ_PER_FRAME {
                     match connection.stream.read(&mut chunk) {
                         Ok(0) => {
@@ -243,7 +256,13 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                             buffer.extend_from_slice(&chunk[..len]);
                             read += len;
                         }
-                        Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                        // Nothing yet. Idle connections wait for the next frame, but a request
+                        // that has started arriving keeps being read for a while.
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                            if buffer.is_empty() || started.elapsed() >= UPLOAD_TIME_PER_FRAME {
+                                break;
+                            }
+                        }
                         Err(_) => {
                             connection.state = finished();
                             return;
@@ -271,6 +290,13 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                 let State::Reading(buffer) = std::mem::replace(&mut connection.state, State::Reading(Vec::new())) else {
                     unreachable!()
                 };
+                if request.content_length > 64 * 1024 {
+                    job::log(&format!(
+                        "Sharing: received {} bytes in {:.1} s",
+                        request.content_length,
+                        connection.opened.elapsed().as_secs_f32()
+                    ));
+                }
                 connection.state = route(&request, &buffer[request.body_start..end], content, status, events);
             }
             State::Writing { data, sent, file } => {
@@ -366,6 +392,25 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                 return;
             }
         }
+    }
+}
+
+/// Asks for a larger receive buffer. The default still works if this fails.
+fn set_receive_buffer(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    let size = RECEIVE_BUFFER;
+    // SAFETY: the socket is open for the life of `stream`, and `size` outlives the call.
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&size as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        job::log("Sharing: could not enlarge the receive buffer");
     }
 }
 

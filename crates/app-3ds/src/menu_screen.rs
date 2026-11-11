@@ -1,9 +1,8 @@
 //! Draws the view that `ui_core::menu` produces.
 
-use ui_core::display::Display;
 use ui_core::menu::{
-    pill_spans, step_lefts, Layout, Pills, View, PILL_HEIGHT, PILL_TOP, PILL_WIDTH, ROW_HEIGHT, ROW_LEFT, ROW_TOP,
-    ROW_WIDTH, STEP_WIDTH, VALUE_CENTER, VALUE_LEFT,
+    pill_boxes, step_lefts, Layout, Pills, View, PILL_HEIGHT, PILL_TOP, PILL_WIDTH, ROW_HEIGHT, ROW_LEFT, ROW_TOP,
+    ROW_WIDTH, STEP_WIDTH, VALUE_CENTER, VALUE_LEFT, HINT_TOP, VIEW_BOTTOM,
 };
 
 use std::ffi::c_void;
@@ -13,8 +12,15 @@ use crate::draw::{self, Font, CENTER, LEFT, RIGHT};
 use crate::icons::Icons;
 use crate::model_view::Preview;
 
-/// Text scales for the sizes picked on the Display page. citro2d draws any font with 30 pixel glyph
-/// cells at scale 1. Rows, hints and the top screen text share one size so the screens look even.
+/// Text sizes in pixels. citro2d draws any font with 30 pixel glyph cells at scale 1, so a size in
+/// pixels is drawn at that size over 30. Rows, hints and the top screen text share one size so the
+/// screens look even. The body font is converted at 18 pixels, so text at 18 is sharpest.
+const TEXT_SIZE: f32 = 18.0;
+const TITLE_SIZE: f32 = 26.0;
+/// The height of the hint line's button badges.
+const BADGE_SIZE: f32 = 21.0;
+
+/// Text scales for `TEXT_SIZE` and `TITLE_SIZE`.
 #[derive(Clone, Copy)]
 struct Sizes {
     text: f32,
@@ -22,8 +28,8 @@ struct Sizes {
 }
 
 impl Sizes {
-    fn new(display: Display) -> Self {
-        Self { text: f32::from(display.text) / 30.0, title: f32::from(display.title) / 30.0 }
+    fn new() -> Self {
+        Self { text: TEXT_SIZE / 30.0, title: TITLE_SIZE / 30.0 }
     }
 
     /// The smallest the top screen text gets when a page has a lot to say.
@@ -53,6 +59,8 @@ const PILL_RADIUS: f32 = 5.0;
 enum Plate {
     Bar,
     Card,
+    /// A card with two lines of pills.
+    TallCard,
     Line,
 }
 
@@ -64,6 +72,8 @@ fn plate(skin: &Skin, kind: Plate, focused: bool, y: f32, height: f32) {
     let (own, own_focused) = match kind {
         Plate::Bar => (skin.bar, skin.bar_focused),
         Plate::Card => (skin.card, skin.card_focused),
+        // Without tall card art, the usual card art stretches.
+        Plate::TallCard => (skin.card_tall.or(skin.card), skin.card_tall_focused.or(skin.card_focused)),
         Plate::Line => (skin.line, skin.line_focused),
     };
     // Shapes without their own art stretch the row bar.
@@ -111,8 +121,8 @@ fn note_once(line: &str) {
 
 /// `top_art`, if loaded, replaces the plain top screen.
 /// `preview`, if given, is a model and its turn in radians, drawn below the rows.
-pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, skin: &Skin, display: Display, preview: Option<(&Preview, f32)>) {
-    let sizes = Sizes::new(display);
+pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, skin: &Skin, preview: Option<(&Preview, f32)>) {
+    let sizes = Sizes::new();
     draw::frame(
         || match top_art {
             Some(art) => draw_top_art(view, art, sizes),
@@ -125,7 +135,7 @@ pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, skin: &Ski
             draw_bottom(view, icons, skin, sizes);
             if let Some((model, angle)) = preview {
                 // A box below the rows and above the hint bar, clear of the focused row's glow.
-                let top = view.layout.top(view.rows.len()) + 6.0;
+                let top = view.rows.last().map_or(ROW_TOP, |row| row.top + row.height) + 6.0;
                 let height = MODEL_BOX_BOTTOM - top;
                 match skin.model_box.or(skin.line) {
                     Some(art) => art.draw(MODEL_BOX_LEFT, top, MODEL_BOX_WIDTH, height, PLATE_BORDER),
@@ -179,8 +189,6 @@ fn pill_scale(sizes: Sizes) -> f32 {
 const HINT_COLOR: u32 = draw::rgba(0xFF, 0xEE, 0x9C, 255);
 /// The middle of the bar at the bottom of the background art (y 199 to 239).
 const HINT_MIDDLE: f32 = 219.0;
-/// Button badges are this tall, and round buttons this wide.
-const BADGE: f32 = 16.0;
 const HINT_GAP: f32 = 12.0;
 
 /// A control named in the hint line, drawn the way it looks on the console.
@@ -204,42 +212,54 @@ impl Control<'_> {
         }
     }
 
-    fn width(&self, key_scale: f32) -> f32 {
+    /// `badge` is how tall the badge is, and how wide a round one is.
+    fn width(&self, badge: f32, key_scale: f32) -> f32 {
         match self {
-            Control::Round(_) | Control::Pad { .. } => BADGE,
-            Control::Wide(key) => draw::text_width(Font::Body, key, key_scale) + 10.0,
+            Control::Round(_) | Control::Pad { .. } => badge,
+            Control::Wide(key) => draw::text_width(Font::Body, key, key_scale) + badge * 0.6,
         }
     }
 
-    fn draw(&self, left: f32, key_scale: f32) {
-        let top = HINT_MIDDLE - BADGE / 2.0;
+    fn draw(&self, left: f32, badge: f32, key_scale: f32) {
+        let top = HINT_MIDDLE - badge / 2.0;
         match self {
             Control::Round(key) => {
-                draw::circle(left + BADGE / 2.0, HINT_MIDDLE, BADGE / 2.0, HINT_COLOR);
-                centered(key, left, top, BADGE, BADGE, key_scale, draw::INK);
+                draw::circle(left + badge / 2.0, HINT_MIDDLE, badge / 2.0, HINT_COLOR);
+                centered(key, left, top, badge, badge, key_scale, draw::INK);
             }
             Control::Wide(key) => {
-                let width = self.width(key_scale);
-                draw::rounded_rect(left, top, width, BADGE, BADGE / 2.0, HINT_COLOR);
-                centered(key, left, top, width, BADGE, key_scale, draw::INK);
+                let width = self.width(badge, key_scale);
+                draw::rounded_rect(left, top, width, badge, badge / 2.0, HINT_COLOR);
+                centered(key, left, top, width, badge, key_scale, draw::INK);
             }
             Control::Pad { across } => {
                 // A plus sign, with the arms in use lit and the others dim.
-                let arm = 5.0;
+                let arm = (badge * 5.0 / 16.0).round();
                 let (lit, unlit) = (HINT_COLOR, draw::DIM);
                 let (horizontal, vertical) = if *across { (lit, unlit) } else { (unlit, lit) };
-                draw::rect(left + arm + 0.5, top, BADGE - 2.0 * arm - 1.0, BADGE, vertical);
-                draw::rect(left, top + arm + 0.5, BADGE, BADGE - 2.0 * arm - 1.0, horizontal);
-                draw::rect(left + arm + 0.5, top + arm + 0.5, BADGE - 2.0 * arm - 1.0, BADGE - 2.0 * arm - 1.0, lit);
+                draw::rect(left + arm + 0.5, top, badge - 2.0 * arm - 1.0, badge, vertical);
+                draw::rect(left, top + arm + 0.5, badge, badge - 2.0 * arm - 1.0, horizontal);
+                draw::rect(left + arm + 0.5, top + arm + 0.5, badge - 2.0 * arm - 1.0, badge - 2.0 * arm - 1.0, lit);
             }
         }
     }
 }
 
+/// Covers rows that scrolled under the hint bar with the bar's own background.
+fn cover_hint_bar(skin: &Skin) {
+    let height = 240.0 - HINT_TOP;
+    match skin.background {
+        Some(background) => background.part(0.0, HINT_TOP, 320.0, height, 0.0, HINT_TOP, 320.0, height),
+        None => draw::rect(0.0, HINT_TOP, 320.0, height, draw::SKY_BOTTOM),
+    }
+}
+
 /// The hint line, such as "A Select   B Back": each control drawn as a button, then what it does.
-fn draw_hint(hint: &str, sizes: Sizes) {
+fn draw_hint(hint: &str, skin: &Skin, sizes: Sizes) {
+    cover_hint_bar(skin);
     let per_scale = draw::line_height(1.0).max(1.0);
-    let key_scale = sizes.text.min((BADGE - 3.0) / per_scale);
+    let badge = BADGE_SIZE;
+    let key_scale = sizes.text.min((badge - 3.0) / per_scale);
     let parts: Vec<(Option<Control>, &str)> = hint
         .split("   ")
         .map(str::trim)
@@ -255,7 +275,7 @@ fn draw_hint(hint: &str, sizes: Sizes) {
     let width_at = |scale: f32| {
         parts
             .iter()
-            .map(|(control, label)| control.as_ref().map_or(0.0, |control| control.width(key_scale) + 4.0) + draw::text_width(Font::Body, label, scale))
+            .map(|(control, label)| control.as_ref().map_or(0.0, |control| control.width(badge, key_scale) + 4.0) + draw::text_width(Font::Body, label, scale))
             .sum::<f32>()
             + HINT_GAP * parts.len().saturating_sub(1) as f32
     };
@@ -266,8 +286,8 @@ fn draw_hint(hint: &str, sizes: Sizes) {
     let text_top = HINT_MIDDLE - draw::line_height(scale) / 2.0;
     for (control, label) in &parts {
         if let Some(control) = control {
-            control.draw(left, key_scale);
-            left += control.width(key_scale) + 4.0;
+            control.draw(left, badge, key_scale);
+            left += control.width(badge, key_scale) + 4.0;
         }
         draw::text(label, left, text_top, scale, HINT_COLOR, LEFT);
         left += draw::text_width(Font::Body, label, scale) + HINT_GAP;
@@ -286,8 +306,9 @@ fn centered(content: &str, x: f32, y: f32, w: f32, h: f32, scale: f32, color: u3
 fn draw_pills(pills: &Pills, top: f32, scale: f32) {
     match pills {
         Pills::Choices { names, selected } => {
-            for (index, (left, width)) in pill_spans(names.len()).enumerate() {
+            for (index, (left, line_top, width)) in pill_boxes(names.len()).into_iter().enumerate() {
                 let picked = index == *selected;
+                let top = top + line_top;
                 pill_plate(picked, left, top, width);
                 centered(&names[index], left, top, width, PILL_HEIGHT, scale, if picked { draw::INK } else { draw::MUTED });
             }
@@ -316,9 +337,10 @@ fn draw_cards(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
     let pill_text = pill_scale(sizes);
     let name_scale = (PILL_TOP - 8.0) / draw::line_height(1.0).max(1.0);
     let name_scale = sizes.text.min(name_scale);
-    for (slot, row) in in_draw_order(view) {
-        let y = layout.top(slot);
-        plate(skin, Plate::Card, row.focused, y, layout.height);
+    for (_, row) in in_draw_order(view) {
+        let y = row.top;
+        let kind = if row.height > layout.height { Plate::TallCard } else { Plate::Card };
+        plate(skin, kind, row.focused, y, row.height);
         let mut name_left = ROW_LEFT + 10.0;
         if let Some((name, image)) = row.icon.and_then(|name| Some((name, icons.get(name)?))) {
             draw::icon(image, name_left, y + 4.0, icon_size, ui_core::icons::extra_turns(name));
@@ -332,15 +354,14 @@ fn draw_cards(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
         }
     }
     draw_scrollbar(view);
-    draw_hint(&view.hint, sizes);
+    draw_hint(&view.hint, skin, sizes);
 }
 
 fn draw_scrollbar(view: &View) {
-    let layout = view.layout;
-    if view.total_rows > layout.visible {
-        let track_height = layout.visible as f32 * layout.pitch() - layout.gap;
-        let thumb = track_height * layout.visible as f32 / view.total_rows as f32;
-        let offset = track_height * view.scroll as f32 / view.total_rows as f32;
+    let track_height = VIEW_BOTTOM - ROW_TOP;
+    if view.content_height > track_height + 0.5 {
+        let thumb = track_height * track_height / view.content_height;
+        let offset = track_height * view.scroll / view.content_height;
         draw::rect(314.0, ROW_TOP, 3.0, track_height, draw::TRACK);
         draw::rect(314.0, ROW_TOP + offset, 3.0, thumb, draw::GOLD);
     }
@@ -353,8 +374,8 @@ fn draw_lines(view: &View, skin: &Skin, sizes: Sizes) {
     let small = (sizes.text * 0.85).min(18.0 / per_scale);
     let large = sizes.text.min(22.0 / per_scale);
     let room = ROW_WIDTH - 20.0;
-    for (slot, row) in in_draw_order(view) {
-        let y = layout.top(slot);
+    for (_, row) in in_draw_order(view) {
+        let y = row.top;
         plate(skin, Plate::Line, row.focused, y, layout.height);
         let left = ROW_LEFT + 10.0;
         match &row.value {
@@ -370,7 +391,7 @@ fn draw_lines(view: &View, skin: &Skin, sizes: Sizes) {
         }
     }
     draw_scrollbar(view);
-    draw_hint(&view.hint, sizes);
+    draw_hint(&view.hint, skin, sizes);
 }
 
 fn draw_bottom(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
@@ -403,8 +424,8 @@ fn draw_bottom(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
         note_once(&format!("Rows on \"{}\" drawn at {scale:.3} instead of {:.3} to fit.", view.title, sizes.text));
     }
     let text_y = (ROW_HEIGHT - draw::line_height(scale)) / 2.0;
-    for (slot, row) in in_draw_order(view) {
-        let y = Layout::ROWS.top(slot);
+    for (_, row) in in_draw_order(view) {
+        let y = row.top;
         plate(skin, Plate::Bar, row.focused, y, ROW_HEIGHT);
         if let Some((name, image)) = row.icon.and_then(|name| Some((name, icons.get(name)?))) {
             let turns = ui_core::icons::extra_turns(name);
@@ -424,5 +445,5 @@ fn draw_bottom(view: &View, icons: &Icons, skin: &Skin, sizes: Sizes) {
         }
     }
     draw_scrollbar(view);
-    draw_hint(&view.hint, sizes);
+    draw_hint(&view.hint, skin, sizes);
 }

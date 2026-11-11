@@ -14,35 +14,8 @@ const FOLDER: &str = "sdmc:/3ds/albw-rando/art";
 const TOP: (&str, &[u8]) = ("top.png", include_bytes!("../assets/top.png"));
 /// Fonts in the 3DS .bcfnt format. devkitPro's `mkbcfnt` makes them from .ttf or .otf files.
 const TITLE_FONT: (&str, &[u8]) = ("title.bcfnt", include_bytes!("../assets/title.bcfnt"));
-/// The body font comes in two conversions, with 14 and 18 pixel glyph cells. Text is sharpest
-/// drawn at or a little below a font's cell size, so each text size uses the nearer one.
+/// The body font, converted at 18 pixel glyph cells to match the menus' 18 pixel text.
 const BODY_FONT: (&str, &[u8]) = ("body.bcfnt", include_bytes!("../assets/body.bcfnt"));
-const BODY_FONT_LARGE: (&str, &[u8]) = ("body-large.bcfnt", include_bytes!("../assets/body-large.bcfnt"));
-/// Text sizes above this use the large body font.
-const SMALL_BODY_FONT_UP_TO: u8 = 14;
-
-/// Where the Display page's sizes are saved.
-pub const DISPLAY: &str = "sdmc:/3ds/albw-rando/display.txt";
-
-/// The saved text sizes, or the defaults.
-pub fn load_display() -> ui_core::display::Display {
-    ui_core::display::Display::parse(&fs::read_to_string(DISPLAY).unwrap_or_default())
-}
-
-fn body_font(text_size: u8) -> (&'static str, &'static [u8]) {
-    if text_size <= SMALL_BODY_FONT_UP_TO {
-        BODY_FONT
-    } else {
-        BODY_FONT_LARGE
-    }
-}
-
-/// Swaps the body font if a new text size wants the other conversion. Call it between frames.
-pub fn resize_body_font(old_size: u8, new_size: u8) {
-    if body_font(old_size).0 != body_font(new_size).0 {
-        load_font(draw::Font::Body, body_font(new_size));
-    }
-}
 
 fn load_font(font: draw::Font, file: (&str, &'static [u8])) -> String {
     let (sd, built_in, source) = read(file);
@@ -63,9 +36,9 @@ fn read(file: (&str, &'static [u8])) -> (Vec<u8>, &'static [u8], String) {
     }
 }
 
-/// Loads the fonts for a text size. Returns a note for the log.
-pub fn load_fonts(text_size: u8) -> String {
-    format!("{} {}", load_font(draw::Font::Title, TITLE_FONT), load_font(draw::Font::Body, body_font(text_size)))
+/// Loads the fonts. Returns a note for the log.
+pub fn load_fonts() -> String {
+    format!("{} {}", load_font(draw::Font::Title, TITLE_FONT), load_font(draw::Font::Body, BODY_FONT))
 }
 
 /// Loads the top screen picture. Returns it, if it loaded, and a note for the log.
@@ -98,6 +71,9 @@ pub struct Skin {
     /// Two-line rows, as in spoiler logs and credits, 304 by 44. Without them, the bars stretch.
     pub line: Option<draw::Art>,
     pub line_focused: Option<draw::Art>,
+    /// Option cards with two lines of pills, 304 by 80.
+    pub card_tall: Option<draw::Art>,
+    pub card_tall_focused: Option<draw::Art>,
     /// The box the spinning model shows in on the Models and Voices page, 128 by 106.
     pub model_box: Option<draw::Art>,
 }
@@ -109,6 +85,8 @@ const CARD: (&str, &[u8]) = ("card.png", include_bytes!("../assets/card.png"));
 const CARD_FOCUSED: (&str, &[u8]) = ("card-focused.png", include_bytes!("../assets/card-focused.png"));
 const LINE: (&str, &[u8]) = ("line.png", include_bytes!("../assets/line.png"));
 const LINE_FOCUSED: (&str, &[u8]) = ("line-focused.png", include_bytes!("../assets/line-focused.png"));
+const CARD_TALL: (&str, &[u8]) = ("card-tall.png", include_bytes!("../assets/card-tall.png"));
+const CARD_TALL_FOCUSED: (&str, &[u8]) = ("card-tall-focused.png", include_bytes!("../assets/card-tall-focused.png"));
 const MODEL_BOX: (&str, &[u8]) = ("model-box.png", include_bytes!("../assets/model-box.png"));
 
 fn load_art(file: (&str, &'static [u8]), notes: &mut Vec<String>) -> Option<draw::Art> {
@@ -143,6 +121,8 @@ pub fn load_skin() -> (Skin, String) {
         card_focused: load_art(CARD_FOCUSED, &mut notes),
         line: load_art(LINE, &mut notes),
         line_focused: load_art(LINE_FOCUSED, &mut notes),
+        card_tall: load_art(CARD_TALL, &mut notes),
+        card_tall_focused: load_art(CARD_TALL_FOCUSED, &mut notes),
         model_box: load_art(MODEL_BOX, &mut notes),
     };
     (skin, format!("Bottom screen art: {}.", notes.join(", ")))

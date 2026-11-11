@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Menu logic, settings table, and presets, with no console dependencies so tests run on a computer"
-authors = ["Sebastian Neiswanger"]
+authors = ["Faith Branch Software LLC"]
 
 [dependencies]
 modinfo = { path = "../../vendor/z17-randomizer/modinfo" }

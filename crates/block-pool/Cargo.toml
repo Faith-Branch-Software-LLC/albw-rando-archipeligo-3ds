@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "A separate memory pool for large allocations, which resists fragmentation"
-authors = ["Sebastian Neiswanger"]
+authors = ["Faith Branch Software LLC"]

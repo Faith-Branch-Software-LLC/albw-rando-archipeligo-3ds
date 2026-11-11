@@ -118,17 +118,18 @@ impl RomSource {
     where
         P: Into<String>,
     {
+        let path: String = path.into();
         match self {
             Self::Image(romfs) => romfs.read(path),
             Self::Mounted(root) => {
-                let path = path.into();
+                let path: String = path.into();
                 let relative = path.strip_prefix('/').unwrap_or(&path);
                 let data = fs::read(format!("{root}{relative}"))
                     .map_err(|err| Error::new(format!("Could not read '{relative}': {err}")))?;
                 Ok(File::new(path, data.into_boxed_slice()))
             }
             Self::Overlaid(folders, game) => {
-                let path = path.into();
+                let path: String = path.into();
                 let relative = path.strip_prefix('/').unwrap_or(&path);
                 for folder in folders.iter() {
                     let file = folder.join(relative);

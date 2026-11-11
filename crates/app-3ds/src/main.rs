@@ -75,6 +75,40 @@ fn load_presets() -> (Vec<Preset>, Vec<String>) {
     (list, notes)
 }
 
+/// Button presses for the sound test. It starts on the first rules page. First come quick presses,
+/// each before the last sound ends, then slow ones that open and close pages and end on the home
+/// page without pressing A there. `None` once the script is over.
+fn scripted_input(frame: u32) -> Option<Input> {
+    type Press = fn(&mut Buttons);
+    const QUICK: &[Press] = &[|b| b.down = true, |b| b.up = true, |b| b.right = true, |b| b.left = true];
+    const SLOW: &[Press] = &[
+        |b| b.down = true,
+        |b| b.up = true,
+        |b| b.right = true,
+        |b| b.a = true,
+        |b| b.r = true,
+        |b| b.l = true,
+        |b| b.b = true,
+        |b| b.b = true,
+        |b| b.down = true,
+        |b| b.up = true,
+    ];
+    const QUICK_GAP: u32 = 4;
+    const SLOW_GAP: u32 = 30;
+    let quick_frames = QUICK.len() as u32 * 4 * QUICK_GAP;
+    let (press, phase) = if frame < quick_frames {
+        (QUICK[(frame / QUICK_GAP) as usize % QUICK.len()], frame % QUICK_GAP)
+    } else {
+        let step = ((frame - quick_frames) / SLOW_GAP) as usize;
+        (*SLOW.get(step)?, (frame - quick_frames) % SLOW_GAP)
+    };
+    let mut buttons = Buttons::default();
+    if phase == 0 {
+        press(&mut buttons);
+    }
+    Some(Input { pressed: buttons, held: buttons, touch: None })
+}
+
 fn read_input(hid: &Hid) -> Input {
     let to_buttons = |keys: KeyPad| Buttons {
         up: keys.intersects(KeyPad::DPAD_UP | KeyPad::CPAD_UP),
@@ -242,15 +276,15 @@ fn main() {
     );
     let check = job::check_game();
     let game_location = check.summary.clone();
+    let copy_from = check.copy_from;
     let mut check_log = check.details.join("\n");
     check_log.push_str(&format!("\n{game_location}\n"));
     let (loaded_icons, icon_note) = icons::load(check);
     check_log.push_str(&format!("{icon_note}\n"));
     let (top_art, art_note) = art::load_top();
     let (skin, skin_note) = art::load_skin();
-    let mut display = art::load_display();
     check_log.push_str(&format!("{skin_note}\n"));
-    check_log.push_str(&format!("{art_note}\n{}\n", art::load_fonts(display.text)));
+    check_log.push_str(&format!("{art_note}\n{}\n", art::load_fonts()));
     let _ = fs::write(job::CHECK_LOG, check_log);
 
     let (preset_list, notes) = load_presets();
@@ -258,7 +292,7 @@ fn main() {
     let mut voices = voice::Voices::new();
     menu.set_mods(job::list_mods(job::MODEL_DIR), job::list_mods(job::VOICE_DIR));
     menu.game_location = game_location;
-    menu.display = display;
+    menu.can_copy_game = copy_from.is_some();
     if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
         menu.set_player_name(&name);
     }
@@ -293,6 +327,8 @@ fn main() {
         }
     }
 
+    // For testing: "sounds" presses buttons by itself to play every menu sound, then closes the app.
+    let mut sound_test: Option<u32> = None;
     // For testing: opens a page of rules by number, or "mods" and an optional model name opens the
     // Models and Voices page, and "replace" and a name asks to replace that preset, to check how
     // they look. After "mods", a third line names a voice to play once, or "game" for the original.
@@ -300,7 +336,10 @@ fn main() {
     if let Ok(text) = fs::read_to_string(job::TEST_PAGE) {
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("").trim();
-        if first == "mods" {
+        if first == "sounds" {
+            menu.open_category(0);
+            sound_test = Some(0);
+        } else if first == "mods" {
             menu.select_mod(ModKind::Model, lines.next().unwrap_or("").trim());
             menu.open_mods();
             if let Some(voice) = lines.next().map(str::trim).filter(|line| !line.is_empty()) {
@@ -373,11 +412,41 @@ fn main() {
             }
         }
 
-        let action = if autostart { Action::Generate } else { menu.update(read_input(&hid)) };
+        let input = match sound_test.as_mut() {
+            Some(frame) => {
+                *frame += 1;
+                match scripted_input(*frame) {
+                    Some(input) => input,
+                    None => {
+                        job::log("Sound test: every press played without a crash.");
+                        break 'app;
+                    }
+                }
+            }
+            None => read_input(&hid),
+        };
+        let action = if autostart { Action::Generate } else { menu.update(input) };
         autostart = false;
+        if let Some(sound) = menu.take_sound() {
+            // The voice sample is the sound for pressing Y.
+            if action != Action::PlayVoice {
+                if sound_test.is_some() {
+                    job::log(&format!("Sound test: {sound:?} on {:?}", menu.page()));
+                }
+                voices.play_sound(sound);
+            }
+        }
         match action {
             Action::None => {}
             Action::Exit => break 'app,
+            Action::CopyGameFiles => match copy_from.ok_or_else(|| "The game wasn't found.".to_owned()).and_then(job::start_copy) {
+                // The app closes, the system starts the game, and the plugin comes back here.
+                Ok(details) => {
+                    let _ = fs::write(job::COPY_LOG, details.join("\n"));
+                    break 'app;
+                }
+                Err(text) => menu.show_message("Can't Copy the Game Files", &text),
+            },
             Action::EditSeed => edit_seed(&mut menu, &mut seed_was_typed, &apt, &gfx),
             Action::RandomSeed => {
                 menu.seed = random_seed();
@@ -461,11 +530,6 @@ fn main() {
                 continue;
             }
         }
-        if menu.display != display {
-            art::resize_body_font(display.text, menu.display.text);
-            display = menu.display;
-            let _ = fs::write(art::DISPLAY, display.save());
-        }
         frames = frames.wrapping_add(1);
         retired.retain(|(frame, _)| frames.wrapping_sub(*frame) < 2);
         if previews_work && menu.page() == Page::Mods {
@@ -486,7 +550,7 @@ fn main() {
             retired.push((frames, old));
         }
         let shown = preview.as_ref().and_then(|(_, model)| model.as_ref()).map(|model| (model, frames as f32 * 0.02));
-        menu_screen::draw(&menu.view(), &loaded_icons, top_art, &skin, display, shown);
+        menu_screen::draw(&menu.view(), &loaded_icons, top_art, &skin, shown);
     }
     draw::stop();
 }

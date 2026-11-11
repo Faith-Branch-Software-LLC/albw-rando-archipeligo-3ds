@@ -6,7 +6,6 @@ pub mod spoiler;
 pub mod ap_option_table;
 pub mod ap_yaml;
 pub mod net;
-pub mod display;
 pub mod flim;
 pub mod icons;
 pub mod menu;

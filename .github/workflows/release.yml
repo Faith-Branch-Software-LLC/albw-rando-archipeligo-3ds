@@ -92,10 +92,21 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="/opt/devkitpro/tools/bin:/opt/devkitpro/devkitARM/bin:$PATH"
           cargo 3ds build --release -p app-3ds
+      - name: Pack the CIA
+        run: |
+          apt-get install -y --no-install-recommends unzip
+          curl -sSfLO https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip
+          curl -sSfLO https://github.com/Epicpkmn11/bannertool/releases/download/v1.2.2/bannertool.zip
+          unzip -q makerom-v0.19.0-ubuntu_x86_64.zip -d makerom
+          unzip -q bannertool.zip -d bannertool
+          chmod +x makerom/makerom bannertool/linux-x86_64/bannertool
+          MAKEROM=$PWD/makerom/makerom BANNERTOOL=$PWD/bannertool/linux-x86_64/bannertool sh tools/build-cia.sh
+          mkdir -p app
+          cp target/armv6k-nintendo-3ds/release/albw-rando.3dsx target/cia/albw-rando.cia app/
       - uses: actions/upload-artifact@v7
         with:
           name: app
-          path: target/armv6k-nintendo-3ds/release/albw-rando.3dsx
+          path: app/
           if-no-files-found: error
 
   release:
@@ -115,13 +126,14 @@ jobs:
           cp built/apworld/albw_3ds.apworld built/apworld/version.txt sd/3ds/albw-rando/apworld/
           touch sd/3ds/albw-rando/ap/.keep
           (cd sd && zip -r ../albw-rando-sd.zip .)
-          cp built/apworld/albw_3ds.apworld .
+          cp built/apworld/albw_3ds.apworld built/app/albw-rando.cia .
       - uses: actions/upload-artifact@v7
         with:
           name: release
           path: |
             albw-rando-sd.zip
             albw_3ds.apworld
+            albw-rando.cia
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
@@ -129,9 +141,11 @@ jobs:
           files: |
             albw-rando-sd.zip
             albw_3ds.apworld
+            albw-rando.cia
           body: |
             Extract albw-rando-sd.zip to the root of your SD card. It adds the app and the
             /3ds/albw-rando folder with the apworld that the albw.local page offers to hosts.
+            To have the app on the HOME Menu, also install albw-rando.cia with FBI.
 
             Hosts: put albw_3ds.apworld in Archipelago/custom_worlds/. The game is
             "A Link Between Worlds - 3DS", based on randomsalience's albw-archipelago.

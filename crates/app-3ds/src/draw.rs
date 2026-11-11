@@ -177,7 +177,8 @@ impl Art {
         (!image.is_null()).then(|| Self { image, width: picture.width.into(), height: picture.height.into() })
     }
 
-    fn part(self, sx: f32, sy: f32, sw: f32, sh: f32, x: f32, y: f32, w: f32, h: f32) {
+    /// Draws the part of the art from (sx, sy), sw by sh, into x, y, w by h.
+    pub fn part(self, sx: f32, sy: f32, sw: f32, sh: f32, x: f32, y: f32, w: f32, h: f32) {
         // SAFETY: Only called inside `frame`, and loaded images live until the app exits.
         unsafe { c2d::shim_image_draw_part(self.image, sx, sy, sw, sh, x, y, w, h) };
     }
