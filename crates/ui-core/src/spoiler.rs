@@ -77,34 +77,8 @@ pub fn parse(json: &str) -> Result<Spoiler, String> {
         }
     }
 
-    // The order the seed expects, by sphere.
-    let playthrough = log.get("metrics").and_then(|metrics| object(metrics, "playthrough"));
-    for (sphere, contents) in playthrough.into_iter().flatten() {
-        for kind in ["items", "goals"] {
-            for (place, item) in object(contents, kind).into_iter().flatten() {
-                push(&mut entries, format!("Playthrough: {sphere}"), place.as_str(), text(item));
-            }
-        }
-    }
-
-    // Hints, with the ghosts that give each one.
-    let hints = log.get("hints");
-    for (kind, group) in [
-        ("path_hints", "Path Hints"),
-        ("always_hints", "Always Hints"),
-        ("sometimes_hints", "Sometimes Hints"),
-        ("maiamai_hints", "Maiamai Hints"),
-        ("custom_hints", "Custom Hints"),
-    ] {
-        for hint in hints.and_then(|hints| hints.get(kind)).and_then(Value::as_array).into_iter().flatten() {
-            let ghosts = hint.get("ghosts").map(text).unwrap_or_default();
-            let place = if ghosts.is_empty() { "Hint".to_owned() } else { ghosts };
-            push(&mut entries, group, place, hint.get("hint").map(text).unwrap_or_default());
-        }
-    }
-    if let Some(hint) = hints.and_then(|hints| hints.get("bow_of_light_hint")).filter(|hint| !hint.is_null()) {
-        push(&mut entries, "Hints", "Bow of Light Hint", text(hint));
-    }
+    // The log's playthrough spheres and hint texts are left out: the list is for finding where
+    // an item is, and those entries would repeat places or fill the item picker with sentences.
 
     pairs(&mut entries, "Cracks", object(&log, "crack_map"));
     pairs(&mut entries, "Weather Vanes", object(&log, "weather_vane_map"));
@@ -157,8 +131,8 @@ mod tests {
         };
         assert!(has("Hyrule: Death Mountain", "Bouldering Guy", "Heart Container"));
         assert!(has("Dungeons: Eastern Palace", "[EP] (1F) Entrance", "Bow+"));
-        assert!(has("Playthrough: Sphere 00", "Ravio's Gift", "Glove+"));
-        assert!(has("Path Hints", "Ghost A, Ghost B", "Kakariko is on the path to Zaganaga"));
+        // Playthrough spheres and hints are not listed.
+        assert!(!spoiler.entries.iter().any(|entry| entry.group.starts_with("Playthrough") || entry.group.ends_with("Hints")));
         assert!(has("Cracks", "B Crack", "C Crack"));
         assert!(has("Lorule Castle Trials", "Tile Trial", "Required"));
         // Cracks that lead to themselves are not news.
@@ -186,9 +160,8 @@ mod tests {
     fn reads_a_real_log_when_one_is_given() {
         let Ok(path) = std::env::var("ALBW_SPOILER") else { return };
         let spoiler = parse(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert!(spoiler.entries.len() > 400, "{} entries", spoiler.entries.len());
+        assert!(spoiler.entries.len() > 200, "{} entries", spoiler.entries.len());
         assert!(!spoiler.hash.is_empty());
-        assert!(spoiler.entries.iter().any(|entry| entry.group.starts_with("Playthrough")));
-        assert!(spoiler.entries.iter().any(|entry| entry.group.ends_with("Hints")));
+        assert!(!spoiler.entries.iter().any(|entry| entry.group.starts_with("Playthrough")));
     }
 }

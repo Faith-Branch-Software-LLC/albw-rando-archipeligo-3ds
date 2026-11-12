@@ -17,6 +17,15 @@ Made by Faith Branch Software LLC. It runs rickfay's
 
 ## Install
 
+### With FBI
+
+In FBI, choose Remote Install, then Scan QR Code, and scan this code. It installs the latest
+release's `albw-rando.cia` to the HOME Menu.
+
+![QR code for the latest albw-rando.cia](https://github.com/Faith-Branch-Software-LLC/albw-rando-archipeligo-3ds/releases/latest/download/albw-rando-qr.png)
+
+### By hand
+
 1. Download `albw-rando-sd.zip` from the [latest release](../../releases/latest).
 2. Extract it to the root of your SD card. It adds `/3ds/albw-rando.3dsx` and the
    `/3ds/albw-rando/` folder.

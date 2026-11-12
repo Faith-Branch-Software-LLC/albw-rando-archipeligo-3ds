@@ -240,6 +240,8 @@ pub enum Page {
     Spoilers,
     /// One spoiler log's entries, or the ones that match the search.
     Spoiler,
+    /// Every item in the open spoiler log, to show only where one of them is.
+    SpoilerItems,
     /// Archipelago: sharing, the player name, and patch files.
     Archipelago,
     /// The Archipelago options pages, and the buttons to copy the rules or reset.
@@ -330,6 +332,9 @@ enum Target {
     SpoilerFile(usize),
     ListPatches,
     PatchFile(usize),
+    /// Shows only the spoiler entries holding this item, by index into `spoiler_items`, or every
+    /// entry for `None`.
+    SpoilerItem(Option<usize>),
     StartSharing,
     EditPlayerName,
     /// An Archipelago option, by index into `AP_OPTIONS`.
@@ -418,6 +423,9 @@ pub struct Menu {
     /// True when the game is installed but its files are not on the SD card yet. The home page
     /// then offers to copy them.
     pub can_copy_game: bool,
+    /// False when the app found no game files it can read. The home page then hides everything
+    /// that needs them, so rules can't be changed for a seed that can't be made.
+    pub has_game: bool,
     presets: Vec<Preset>,
     /// True once a rule changes on the rules pages, until the player leaves them.
     rules_changed: bool,
@@ -431,6 +439,8 @@ pub struct Menu {
     search: String,
     /// The spoiler entries that match the search.
     found: Vec<usize>,
+    /// The open spoiler log's items, sorted, each with how many places hold it.
+    spoiler_items: Vec<(String, usize)>,
     /// Names of the Archipelago patch files, without the folder.
     patch_files: Vec<String>,
     patch: PatchSummary,
@@ -516,6 +526,7 @@ impl Menu {
             preset_name: "Standard".to_owned(),
             game_location: String::new(),
             can_copy_game: false,
+            has_game: true,
             presets,
             rules_changed: false,
             replacing: None,
@@ -525,6 +536,7 @@ impl Menu {
             spoiler: Spoiler::default(),
             search: String::new(),
             found: Vec::new(),
+            spoiler_items: Vec::new(),
             patch_files: Vec::new(),
             patch: PatchSummary::default(),
             looks: [0; 2],
@@ -725,9 +737,34 @@ impl Menu {
     /// Opens a spoiler log with every entry showing.
     pub fn show_spoiler(&mut self, spoiler: Spoiler) {
         self.found = (0..spoiler.entries.len()).collect();
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for entry in spoiler.entries.iter().filter(|entry| !entry.item.is_empty()) {
+            *counts.entry(entry.item.clone()).or_default() += 1;
+        }
+        let mut items: Vec<(String, usize)> = counts.into_iter().collect();
+        items.sort_by_cached_key(|(item, _)| item.to_lowercase());
+        self.spoiler_items = items;
         self.spoiler = spoiler;
         self.search.clear();
         self.open(Page::Spoiler);
+    }
+
+    /// Shows only the spoiler entries that hold `item`, or every entry for `None`.
+    fn filter_item(&mut self, item: Option<usize>) {
+        match item.and_then(|index| self.spoiler_items.get(index)) {
+            Some((item, _)) => {
+                self.search = item.clone();
+                let entries = &self.spoiler.entries;
+                self.found = (0..entries.len()).filter(|&index| entries[index].item == *item).collect();
+            }
+            None => {
+                self.search.clear();
+                self.found = (0..self.spoiler.entries.len()).collect();
+            }
+        }
+        let place = self.place_mut();
+        place.focus = 0;
+        place.scroll = 0.0;
     }
 
     /// Shows only the spoiler entries that match `query`.
@@ -831,6 +868,15 @@ impl Menu {
                 if self.can_copy_game {
                     rows.push(row("Copy Game Files", None, "Starts your game once to copy the files the randomizer needs to the SD card, about 300 MB, then comes back here. Needs Luma's plugin loader.", Target::CopyGameFiles));
                 }
+                if !self.has_game {
+                    rows.push(row("Game Files Needed", None, "Rules, presets, models and Archipelago unlock once the app can read your game. Install A Link Between Worlds (USA) and choose Copy Game Files, or put your own decrypted dump at /3ds/albw-rando/game.cci, then reopen the app.", Target::Nothing));
+                    rows.extend([
+                        row("Spoiler Logs", None, "Look up where items are in seeds you made before.", Target::ListSpoilers),
+                        row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
+                        row("Exit", None, "Close the app.", Target::Exit),
+                    ]);
+                    return rows;
+                }
                 rows.extend([
                 row("Make a Seed", None, "Pick the seed number, review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
                 row("Rules", None, "Change every option by hand.", Target::Open(Page::Categories)),
@@ -877,11 +923,11 @@ impl Menu {
                 row("Cancel", None, "Nothing is saved.", Target::Back),
             ],
             Page::Mods => vec![
-                row("Player Model", Some(self.model.text()), "Add a mod as /3ds/albw-rando/models/<name>/romfs. It then appears here.", Target::Mod(ModKind::Model)),
+                row("Player Model", Some(self.model.text()), "Left/Right to choose. To add a model, copy its romfs folder to the SD card as /3ds/albw-rando/models/<Mod Name>/romfs, so its files sit at /3ds/albw-rando/models/<Mod Name>/romfs/Archive/... The folder name shows here after you reopen the app.", Target::Mod(ModKind::Model)),
                 row(
                     "Voice",
                     Some(self.voice.text()),
-                    "Press Y to hear it. Add a mod as /3ds/albw-rando/voices/<name>/romfs. It then appears here.",
+                    "Press Y to hear it. To add a voice, copy its romfs folder to the SD card as /3ds/albw-rando/voices/<Mod Name>/romfs, so its sound file sits at /3ds/albw-rando/voices/<Mod Name>/romfs/World/Sound/Jack.bcsar. The folder name shows here after you reopen the app.",
                     Target::Mod(ModKind::Voice),
                 ),
             ],
@@ -968,6 +1014,14 @@ impl Menu {
                 row("Go Back", None, "", Target::Back),
             ],
             Page::Spoiler if self.found.is_empty() => vec![row("No Matches", None, "", Target::Nothing)],
+            Page::SpoilerItems => {
+                let mut rows = vec![row("Every Entry", Some(self.spoiler.entries.len().to_string()), "Shows the whole log again.", Target::SpoilerItem(None))];
+                rows.extend(self.spoiler_items.iter().enumerate().map(|(index, (item, count))| {
+                    let places = if *count == 1 { "1 place".to_owned() } else { format!("{count} places") };
+                    row(item, Some(places), "Shows only the places that hold this item.", Target::SpoilerItem(Some(index)))
+                }));
+                rows
+            }
             Page::Spoiler => self
                 .found
                 .iter()
@@ -1071,6 +1125,11 @@ impl Menu {
                 Action::None
             }
             Target::ApplyPatch => Action::PatchArchipelago(self.patch.file.clone()),
+            Target::SpoilerItem(item) => {
+                self.back();
+                self.filter_item(item);
+                Action::None
+            }
             Target::Nothing => Action::None,
         }
     }
@@ -1340,8 +1399,8 @@ impl Menu {
             if pressed.y {
                 return Action::SearchSpoiler;
             }
-            if pressed.x && !self.search.is_empty() {
-                self.set_search("");
+            if pressed.x {
+                self.open(Page::SpoilerItems);
                 return Action::None;
             }
         }
@@ -1385,7 +1444,7 @@ impl Menu {
         if pressed.y && self.page() == Page::Mods {
             return Action::PlayVoice;
         }
-        if pressed.start && self.page() != Page::OldWarning && self.page() != Page::Confirm {
+        if pressed.start && self.has_game && self.page() != Page::OldWarning && self.page() != Page::Confirm {
             self.open(Page::Confirm);
         }
         Action::None
@@ -1429,7 +1488,8 @@ impl Menu {
                 let mut lines = paragraph(&self.game_location);
                 lines.push(String::new());
                 lines.extend(paragraph(help));
-                ("A Link Between Worlds".to_owned(), "Randomizer".to_owned(), lines, "A Select   START Make a Seed")
+                let hint = if self.has_game { "A Select   START Make a Seed" } else { "A Select" };
+                ("A Link Between Worlds".to_owned(), "Randomizer".to_owned(), lines, hint)
             }
             Page::Categories => ("Rules".to_owned(), format!("Preset: {}", self.preset_name), paragraph(help), "A Open   B Back"),
             Page::Options(category) => (
@@ -1512,6 +1572,12 @@ impl Menu {
                 ("Archipelago Patch".to_owned(), self.patch.file.clone(), lines, "A Select   Left/Right Change   B Back")
             }
             Page::Spoilers => ("Spoiler Logs".to_owned(), "Newest first".to_owned(), paragraph(help), "A Open   B Back"),
+            Page::SpoilerItems => (
+                "Find an Item".to_owned(),
+                format!("Seed {}   {} items", self.spoiler.seed, self.spoiler_items.len()),
+                paragraph(help),
+                "A Show   B Back",
+            ),
             Page::Spoiler => {
                 let subtitle = if self.search.is_empty() {
                     format!("Seed {}   {} entries", self.spoiler.seed, self.found.len())
@@ -1528,7 +1594,7 @@ impl Menu {
                 }
                 lines.push(String::new());
                 lines.push(format!("Hash: {}", self.spoiler.hash));
-                let hint = if self.search.is_empty() { "Y Search   L/R Group   B Back" } else { "Y Search   X Clear   L/R Group   B Back" };
+                let hint = "Y Type   X Pick Item   L/R Group   B Back";
                 ("Spoiler Log".to_owned(), subtitle, lines, hint)
             }
             Page::About => {
@@ -1989,8 +2055,36 @@ mod tests {
         assert_eq!(labels(&menu), ["No Matches"]);
         press(&mut menu, |b| b.x = true);
         release(&mut menu);
+        assert_eq!(menu.page(), Page::SpoilerItems);
+        assert_eq!(labels(&menu), ["Every Entry", "Bow of Light", "Bow+", "Hookshot+", "Red Rupee"]);
+        press(&mut menu, |b| b.a = true);
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::Spoiler);
         assert_eq!(labels(&menu).len(), 4);
         assert_eq!(menu.search(), "");
+
+        // Picking an item shows only the places that hold exactly that item.
+        press(&mut menu, |b| b.x = true);
+        release(&mut menu);
+        press(&mut menu, |b| b.down = true);
+        release(&mut menu);
+        press(&mut menu, |b| b.down = true);
+        release(&mut menu);
+        press(&mut menu, |b| b.a = true);
+        release(&mut menu);
+        assert_eq!(labels(&menu), ["Desert Chest"]);
+        assert_eq!(menu.search(), "Bow+");
+    }
+
+    #[test]
+    fn home_hides_settings_without_the_game() {
+        let mut menu = menu();
+        menu.has_game = false;
+        let labels: Vec<String> = menu.view().rows.iter().map(|row| row.label.clone()).collect();
+        assert_eq!(labels, ["Game Files Needed", "Spoiler Logs", "About and Credits", "Exit"]);
+        press(&mut menu, |b| b.start = true);
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::Home);
     }
 
     #[test]
