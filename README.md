@@ -65,8 +65,14 @@ cargo 3ds build --release -p app-3ds
 sh apworld/build.sh python3
 ```
 
-The release workflow in `.github/workflows/release.yml` builds the app and an apworld for
-Windows, macOS and Linux when a `v*` tag is pushed.
+The menu sounds are friedspin's Cozy UI SFX. Their license allows them inside the app but not as
+loose files, so they are not in this repository. Put the WAV files in `crates/app-3ds/sounds/` to
+build them in; without them the app has no menu sounds.
+
+When a `v*` tag is pushed, the release workflow in `.github/workflows/release.yml` builds the
+apworld for Windows, macOS and Linux and makes a draft release. Then `sh tools/release-3ds.sh`,
+run on the tagged commit, builds the app and CIA with the sounds, adds them and the SD card zip,
+and publishes the release.
 
 ## Credits and license
 
