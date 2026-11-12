@@ -385,8 +385,18 @@ fn main() {
         }
     }
 
+    // Whether the console may sleep when the lid closes. A sleep in the middle of making a seed
+    // stalls the work for good, and closing the app afterward can crash the system.
+    let mut sleep_allowed = true;
     'app: while apt.main_loop() {
         hid.scan_input();
+
+        let allow_sleep = working.is_none() || progress::finished();
+        if allow_sleep != sleep_allowed {
+            sleep_allowed = allow_sleep;
+            // SAFETY: Only sets a flag in libctru's APT state.
+            unsafe { ctru_sys::aptSetSleepAllowed(allow_sleep) };
+        }
 
         if let Some(screen) = working.as_mut() {
             if progress::finished() {

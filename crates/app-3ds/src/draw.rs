@@ -309,13 +309,28 @@ pub fn bar(x: f32, y: f32, w: f32, h: f32, fraction: f32, color: u32, tick: u32,
     }
 }
 
+/// Draws the triforce. citro2d draws triangles with hard edges, so each piece also gets two faint,
+/// slightly larger copies behind it, which soften the stair steps along its sides.
 pub fn triforce(center_x: f32, top: f32, side: f32, color: u32) {
     let height = side * 0.866;
-    let piece = |x: f32, y: f32| {
-        // SAFETY: Only called inside `frame`.
-        unsafe { c2d::shim_triangle(x, y, x - side / 2.0, y + height, x + side / 2.0, y + height, color) };
-    };
-    piece(center_x, top);
-    piece(center_x - side / 2.0, top + height);
-    piece(center_x + side / 2.0, top + height);
+    let rgb = color & 0x00FF_FFFF;
+    let alpha = color >> 24;
+    // How far each edge moves out, and how strong that copy is.
+    for (grow, strength) in [(0.9, 0.22), (0.45, 0.5), (0.0, 1.0)] {
+        let layer = rgb | (((alpha as f32 * strength) as u32) << 24);
+        let piece = |x: f32, y: f32| {
+            // An equilateral triangle's corners move twice as far from its center as its edges do.
+            let (cx, cy) = (x, y + height * 2.0 / 3.0);
+            let scale = (side / 3f32.sqrt() + 2.0 * grow) / (side / 3f32.sqrt());
+            let corner = |px: f32, py: f32| (cx + (px - cx) * scale, cy + (py - cy) * scale);
+            let (ax, ay) = corner(x, y);
+            let (bx, by) = corner(x - side / 2.0, y + height);
+            let (qx, qy) = corner(x + side / 2.0, y + height);
+            // SAFETY: Only called inside `frame`.
+            unsafe { c2d::shim_triangle(ax, ay, bx, by, qx, qy, layer) };
+        };
+        piece(center_x, top);
+        piece(center_x - side / 2.0, top + height);
+        piece(center_x + side / 2.0, top + height);
+    }
 }

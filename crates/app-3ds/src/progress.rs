@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use ui_core::menu::{ROW_GAP, ROW_HEIGHT, ROW_LEFT, ROW_TOP, ROW_WIDTH};
 
 use crate::art::Skin;
-use crate::draw::{self, Font, CENTER, LEFT, RIGHT};
+use crate::draw::{self, Font, LEFT, RIGHT};
 use crate::memory;
 use crate::menu_screen::{self, Sizes};
 
@@ -218,8 +218,21 @@ impl Screen {
         let sizes = Sizes::new();
         let accent = state.accent();
         draw::gradient(0.0, 0.0, 400.0, 240.0, draw::FOREST, draw::DUSK);
-        draw::triforce(200.0, 10.0, 16.0, draw::GOLD);
-        draw::text_fit(Font::Title, "A Randomizer Between Worlds", 200.0, 40.0, sizes.title, 370.0, draw::GOLD, CENTER);
+        // The title in two lines with the triforce beside it, as in the menu art. Drawn at scale 1,
+        // the size the title font was made at, so it stays sharp.
+        let lines = ["A Randomizer", "Between Worlds"];
+        let title_scale = 1.0;
+        let line_step = draw::line_height(title_scale) * 0.92;
+        let text_width = lines.iter().map(|line| draw::text_width(Font::Title, line, title_scale)).fold(0.0, f32::max);
+        let triforce_side = (line_step * 2.0 / 0.866 / 2.0).floor();
+        let block = text_width + 14.0 + triforce_side * 2.0;
+        let block_left = 200.0 - block / 2.0;
+        let title_top = 8.0;
+        for (index, line) in lines.iter().enumerate() {
+            draw::text_in(Font::Title, line, block_left, title_top + index as f32 * line_step, title_scale, draw::GOLD, LEFT);
+        }
+        let triforce_top = title_top + line_step - triforce_side * 0.866;
+        draw::triforce(block_left + text_width + 14.0 + triforce_side, triforce_top.max(4.0), triforce_side, draw::GOLD);
 
         let (left, right, top, bottom) = (24.0, 376.0, 82.0, 230.0);
         draw::framed(left, top, right - left, bottom - top, 2.0, draw::PLUM, draw::PLUM_EDGE);
