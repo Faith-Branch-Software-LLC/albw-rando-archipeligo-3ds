@@ -202,6 +202,7 @@ static LAST_PHASE: Mutex<&str> = Mutex::new("");
 
 /// Passed to the randomizer as its progress hook.
 pub fn on_progress(phase: &'static str, done: u32, total: u32) {
+    memory::stop_here_if_closing();
     let mut last = LAST_PHASE.lock().unwrap();
     if *last != phase {
         *last = phase;
@@ -240,6 +241,13 @@ pub struct GameCheck {
     pub summary: String,
     /// Result codes, for the logs.
     pub details: Vec<String>,
+}
+
+impl GameCheck {
+    /// True when the app found game files it can read.
+    pub fn found(&self) -> bool {
+        self.source.is_some()
+    }
 }
 
 /// Asks the system whether the game is on a medium. `Err` holds the failing result code.
@@ -410,7 +418,7 @@ pub fn game_voice_clips(names: &[&str]) -> Result<(Vec<ui_core::csar::Clip>, Vec
     let check = check_game();
     let clips = match &check.source {
         Some((_, Source::Mounted { root, .. })) => fs::File::open(format!("{root}{SOUND_ARCHIVE}"))
-            .map_err(|err| err.to_string())
+            .map_err(|err| format!("{root}{SOUND_ARCHIVE}: {err}"))
             .and_then(|file| ui_core::csar::read_clips(&mut ui_core::csar::Seekable(file), names)),
         Some((_, Source::Image)) => rom::Rom::load(IMAGE)
             .map_err(|err| err.to_string())
@@ -504,7 +512,7 @@ fn run(request: Request) -> Result<(), String> {
     log(&format!("App version {}", env!("CARGO_PKG_VERSION")));
     // SAFETY: libctru sets this once during startup, before main.
     let heap_mb = unsafe { crate::__ctru_heap_size } as f32 / (1024.0 * 1024.0);
-    log(&format!("Console memory: {}, heap {heap_mb:.1} MB", if new_memory { "New 3DS" } else { "Old 3DS" }));
+    log(&format!("Memory plan: {}, heap {heap_mb:.1} MB", if new_memory { "New 3DS" } else { "Old 3DS (small heap)" }));
     if archipelago.is_none() {
         log(&format!("Seed {seed}, typed by the player: {seed_was_typed}"));
         log(&format!("Preset: {preset_name}"));

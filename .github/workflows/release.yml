@@ -126,7 +126,16 @@ jobs:
           cp built/apworld/albw_3ds.apworld built/apworld/version.txt sd/3ds/albw-rando/apworld/
           touch sd/3ds/albw-rando/ap/.keep
           (cd sd && zip -r ../albw-rando-sd.zip .)
-          cp built/apworld/albw_3ds.apworld built/app/albw-rando.cia .
+          cp built/apworld/albw_3ds.apworld built/app/albw-rando.cia built/app/albw-rando.3dsx .
+          # Universal-Updater's script saves this next to the apworld as version.txt.
+          cp built/apworld/version.txt apworld-version.txt
+      - name: Make the FBI QR code
+        # FBI's Remote Install scans this code and downloads this release's CIA.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qrencode
+          qrencode -s 6 -m 2 -o albw-rando-qr.png \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/albw-rando.cia"
       - uses: actions/upload-artifact@v7
         with:
           name: release
@@ -134,6 +143,9 @@ jobs:
             albw-rando-sd.zip
             albw_3ds.apworld
             albw-rando.cia
+            albw-rando.3dsx
+            apworld-version.txt
+            albw-rando-qr.png
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
@@ -142,7 +154,19 @@ jobs:
             albw-rando-sd.zip
             albw_3ds.apworld
             albw-rando.cia
+            albw-rando.3dsx
+            apworld-version.txt
+            albw-rando-qr.png
           body: |
+            ## Install with FBI
+
+            In FBI, choose Remote Install, then Scan QR Code, and point the camera at this code.
+            It installs this release's albw-rando.cia.
+
+            ![QR code for albw-rando.cia](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/albw-rando-qr.png)
+
+            ## Install by hand
+
             Extract albw-rando-sd.zip to the root of your SD card. It adds the app and the
             /3ds/albw-rando folder with the apworld that the albw.local page offers to hosts.
             To have the app on the HOME Menu, also install albw-rando.cia with FBI.

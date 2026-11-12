@@ -10,6 +10,7 @@ app builds in live elsewhere:
 | `wips/cards.af` | `crates/app-3ds/assets/` bar, card, card-tall, line (each with a `-focused` version) and `model-box.png` |
 | `wips/icon.af` | `crates/app-3ds/icon.png` (48x48) |
 | `wips/homescreen-backdrop.af` | `crates/app-3ds/cia/banner.png` (256x128, the HOME Menu banner) |
+| `wips/triforce.af` | `crates/app-3ds/assets/triforce.png` (128x112, beside the title while randomizing) |
 
 See `crates/app-3ds/assets/README.md` for every image's name and size.
 

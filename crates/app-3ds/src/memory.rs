@@ -103,8 +103,42 @@ fn add(size: usize, small: bool) {
 
 // SAFETY: Large blocks come from the pool and the rest from the system allocator. Either side
 // covers for the other when full. Each block returns to its maker, which `contains` decides.
+/// Set when the app is closing while a seed is still being made. See `stop_worker`.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+/// Set by the worker once it has stopped.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Stops the worker thread if the app is closing. The worker allocates all the time, and this runs
+/// before it takes any lock, so the worker stops quickly and holds nothing the main thread needs.
+/// It then sleeps until the app's process ends.
+pub fn stop_here_if_closing() {
+    // SAFETY: Reads libctru's current thread pointer, which is null on the main thread.
+    if STOPPING.load(Relaxed) && !unsafe { ctru_sys::threadGetCurrent() }.is_null() {
+        STOPPED.store(true, Relaxed);
+        loop {
+            // SAFETY: Only sleeps this thread.
+            unsafe { ctru_sys::svcSleepThread(1_000_000_000) };
+        }
+    }
+}
+
+/// Asks the worker to stop and waits up to `timeout_ms` for it. Closing the app while the worker
+/// still runs frees memory and services under it, which can crash the whole console.
+pub fn stop_worker(timeout_ms: u32) -> bool {
+    STOPPING.store(true, Relaxed);
+    for _ in 0..timeout_ms / 10 {
+        if STOPPED.load(Relaxed) {
+            return true;
+        }
+        // SAFETY: Only sleeps this thread, which lets the lower-priority worker run.
+        unsafe { ctru_sys::svcSleepThread(10_000_000) };
+    }
+    STOPPED.load(Relaxed)
+}
+
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        stop_here_if_closing();
         let large = layout.size() >= LARGE;
         if large {
             let ptr = with_pool(|pool| pool.alloc(layout.size(), layout.align()));

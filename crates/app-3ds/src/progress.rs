@@ -178,7 +178,8 @@ impl Screen {
         (overall, here_left + later * speed)
     }
 
-    pub fn draw(&mut self) {
+    /// `triforce` is the triforce art, if it loaded. Without it, the triforce is drawn in code.
+    pub fn draw(&mut self, triforce: Option<draw::Art>) {
         self.tick = self.tick.wrapping_add(1);
         let finished = finished();
         let failure = FAILURE.lock().unwrap().clone();
@@ -193,7 +194,7 @@ impl Screen {
 
         let this = &*self;
         let state = State { overall, eta, elapsed, finished, failure: failure.as_deref() };
-        draw::frame(|| this.draw_top(&state), || this.draw_bottom(finished, failure.is_some()));
+        draw::frame(|| this.draw_top(&state, triforce), || this.draw_bottom(finished, failure.is_some()));
     }
 
     fn status(state: &State) -> &'static str {
@@ -214,7 +215,7 @@ impl Screen {
     }
 
     /// The menu's colors and fonts: a night sky, the gold title, and a plum box holding the progress.
-    fn draw_top(&self, state: &State) {
+    fn draw_top(&self, state: &State, triforce: Option<draw::Art>) {
         let sizes = Sizes::new();
         let accent = state.accent();
         draw::gradient(0.0, 0.0, 400.0, 240.0, draw::FOREST, draw::DUSK);
@@ -224,15 +225,23 @@ impl Screen {
         let title_scale = 1.0;
         let line_step = draw::line_height(title_scale) * 0.92;
         let text_width = lines.iter().map(|line| draw::text_width(Font::Title, line, title_scale)).fold(0.0, f32::max);
-        let triforce_side = (line_step * 2.0 / 0.866 / 2.0).floor();
-        let block = text_width + 14.0 + triforce_side * 2.0;
+        // The triforce is as tall as the two lines.
+        let triforce_height = (line_step * 2.0).round();
+        let triforce_width = match triforce {
+            Some(art) => (triforce_height * art.width / art.height).round(),
+            None => triforce_height / 0.866,
+        };
+        let block = text_width + 14.0 + triforce_width;
         let block_left = 200.0 - block / 2.0;
         let title_top = 8.0;
         for (index, line) in lines.iter().enumerate() {
             draw::text_in(Font::Title, line, block_left, title_top + index as f32 * line_step, title_scale, draw::GOLD, LEFT);
         }
-        let triforce_top = title_top + line_step - triforce_side * 0.866;
-        draw::triforce(block_left + text_width + 14.0 + triforce_side, triforce_top.max(4.0), triforce_side, draw::GOLD);
+        let triforce_left = block_left + text_width + 14.0;
+        match triforce {
+            Some(art) => art.part(0.0, 0.0, art.width, art.height, triforce_left, title_top, triforce_width, triforce_height),
+            None => draw::triforce(triforce_left + triforce_width / 2.0, title_top, triforce_width / 2.0, draw::GOLD),
+        }
 
         let (left, right, top, bottom) = (24.0, 376.0, 82.0, 230.0);
         draw::framed(left, top, right - left, bottom - top, 2.0, draw::PLUM, draw::PLUM_EDGE);

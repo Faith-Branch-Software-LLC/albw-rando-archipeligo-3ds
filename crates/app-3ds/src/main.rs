@@ -20,7 +20,7 @@ mod voice;
 use std::fs;
 use std::path::Path;
 
-use ctru::applets::swkbd::{Button, ButtonConfig, Kind as KeyboardKind, SoftwareKeyboard};
+use ctru::applets::swkbd::{Button, ButtonConfig, Error as KeyboardError, Kind as KeyboardKind, SoftwareKeyboard};
 use ctru::prelude::*;
 use ui_core::menu::{Action, Buttons, Input, Menu, ModKind, Page};
 use ui_core::presets::{self, Preset};
@@ -163,12 +163,29 @@ fn edit_seed(menu: &mut Menu, seed_was_typed: &mut bool, apt: &Apt, gfx: &Gfx) {
     }
 }
 
+/// Text for `SoftwareKeyboard::set_initial_text`, padded with one space.
+///
+/// ctru-rs sizes the keyboard's starting text by its byte length and keeps the last slot for the
+/// end marker. Text with no padding loses its last letter, and empty text panics with "index out
+/// of bounds", which closes the app. The space takes that slot and is never shown.
+fn initial_text(text: &str) -> std::borrow::Cow<'static, str> {
+    format!("{text} ").into()
+}
+
 fn search_spoiler(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
     let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
     keyboard.set_hint_text(Some("Item or place, such as bow or eastern"));
-    keyboard.set_initial_text(Some(menu.search().to_owned().into()));
-    if let Ok((query, Button::Right)) = keyboard.launch(apt, gfx) {
-        menu.set_search(&query);
+    keyboard.set_initial_text(Some(initial_text(menu.search())));
+    job::log("Spoiler search: opening the keyboard.");
+    let result = keyboard.launch(apt, gfx);
+    job::log(&format!("Spoiler search: keyboard closed with {:?}", result.as_ref().map(|(_, button)| *button)));
+    match result {
+        Ok((query, Button::Right)) => menu.set_search(&query),
+        Ok(_) => {}
+        Err(err @ (KeyboardError::OutOfMem | KeyboardError::InvalidParameters)) => {
+            menu.show_message("Can't Open the Keyboard", &format!("The {err}. Press X to pick an item from a list instead."))
+        }
+        Err(_) => {}
     }
 }
 
@@ -180,7 +197,7 @@ const AP_OPTIONS: &str = "sdmc:/3ds/albw-rando/ap-options.yaml";
 fn edit_player_name(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
     let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
     keyboard.set_hint_text(Some("Your name in the multiworld, up to 16 letters"));
-    keyboard.set_initial_text(Some(menu.player_name.clone().into()));
+    keyboard.set_initial_text(Some(initial_text(&menu.player_name)));
     if let Ok((name, Button::Right)) = keyboard.launch(apt, gfx) {
         menu.set_player_name(&name);
         if let Err(err) = fs::write(PLAYER_NAME, &menu.player_name) {
@@ -281,7 +298,8 @@ fn main() {
     // SAFETY: libctru sets this once during startup, before main.
     let heap = unsafe { __ctru_heap_size } as usize;
     // A New 3DS that gave the app no more than an Old 3DS would gets planned for like one.
-    let new_memory = is_new && heap >= NEW_3DS_MIN_HEAP && !Path::new(job::SIMULATE_OLD).exists();
+    let simulate_old = Path::new(job::SIMULATE_OLD).exists();
+    let new_memory = is_new && heap >= NEW_3DS_MIN_HEAP && !simulate_old;
     let reserve = if new_memory { NEW_3DS_RESERVE_MB } else { OLD_3DS_RESERVE_MB };
     memory::start_pool(if new_memory { heap } else { heap.min(OLD_3DS_HEAP) }, reserve * 1024 * 1024);
 
@@ -295,6 +313,7 @@ fn main() {
     );
     let check = job::check_game();
     let game_location = check.summary.clone();
+    let has_game = check.found();
     let copy_from = check.copy_from;
     let mut check_log = check.details.join("\n");
     check_log.push_str(&format!("\n{}", memory_report(heap)));
@@ -308,11 +327,14 @@ fn main() {
     let _ = fs::write(job::CHECK_LOG, check_log);
 
     let (preset_list, notes) = load_presets();
-    let mut menu = Menu::new(random_seed(), preset_list, !new_memory);
+    // The Old 3DS notice is for real Old 3DS consoles. A New 3DS that got less memory than usual
+    // gets its own message below instead.
+    let mut menu = Menu::new(random_seed(), preset_list, !is_new || simulate_old);
     let mut voices = voice::Voices::new();
     menu.set_mods(job::list_mods(job::MODEL_DIR), job::list_mods(job::VOICE_DIR));
     menu.game_location = game_location;
     menu.can_copy_game = copy_from.is_some();
+    menu.has_game = has_game;
     if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
         menu.set_player_name(&name);
     }
@@ -330,7 +352,7 @@ fn main() {
         menu.show_message(
             "Less Memory Than Usual",
             &format!(
-                "The console gave the app {:.0} MB to work with instead of the New 3DS's usual 96 MB, so it will work like on an Old 3DS. Seeds may take longer.",
+                "The console gave the app {:.0} MB to work with instead of the New 3DS's usual 96 MB, so it will work like on an Old 3DS, and seeds may take longer. This happens when another app, such as an installer, opens it. For all the memory, close the app and open it from the HOME Menu.",
                 heap as f32 / MB
             ),
         );
@@ -385,17 +407,22 @@ fn main() {
         }
     }
 
-    // Whether the console may sleep when the lid closes. A sleep in the middle of making a seed
-    // stalls the work for good, and closing the app afterward can crash the system.
+    // The console may sleep whenever no seed is being made. A sleep during the work stalls it for
+    // good, and closing the app afterward can crash the system, so the work carries on with the
+    // lid shut.
     let mut sleep_allowed = true;
-    'app: while apt.main_loop() {
+    'app: loop {
+        if !apt.main_loop() {
+            job::log("The system asked the app to close.");
+            break;
+        }
         hid.scan_input();
 
-        let allow_sleep = working.is_none() || progress::finished();
-        if allow_sleep != sleep_allowed {
-            sleep_allowed = allow_sleep;
+        let busy = working.is_some() && !progress::finished();
+        if !busy != sleep_allowed {
+            sleep_allowed = !busy;
             // SAFETY: Only sets a flag in libctru's APT state.
-            unsafe { ctru_sys::aptSetSleepAllowed(allow_sleep) };
+            unsafe { ctru_sys::aptSetSleepAllowed(sleep_allowed) };
         }
 
         if let Some(screen) = working.as_mut() {
@@ -414,7 +441,7 @@ fn main() {
             }
             // Drawing takes time from the work on an Old 3DS, so it draws less often there.
             if vblanks % if is_new { 2 } else { 6 } == 0 {
-                screen.draw();
+                screen.draw(skin.triforce);
             } else {
                 gfx.wait_for_vblank();
             }
@@ -591,6 +618,11 @@ fn main() {
         }
         let shown = preview.as_ref().and_then(|(_, model)| model.as_ref()).map(|model| (model, frames as f32 * 0.02));
         menu_screen::draw(&menu.view(), &loaded_icons, top_art, &skin, shown);
+    }
+    if working.is_some() && !progress::finished() {
+        // Logged first: the worker may stop while holding the log's lock.
+        job::log("Closed while making a seed. Stopping the worker.");
+        memory::stop_worker(5000);
     }
     draw::stop();
 }

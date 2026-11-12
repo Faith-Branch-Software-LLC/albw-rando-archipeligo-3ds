@@ -76,8 +76,11 @@ pub struct Skin {
     pub card_tall_focused: Option<draw::Art>,
     /// The box the spinning model shows in on the Models and Voices page, 128 by 106.
     pub model_box: Option<draw::Art>,
+    /// The triforce beside the title on the randomizing screen, 128 by 112, drawn at half size.
+    pub triforce: Option<draw::Art>,
 }
 
+const TRIFORCE: (&str, &[u8]) = ("triforce.png", include_bytes!("../assets/triforce.png"));
 const BACKGROUND: (&str, &[u8]) = ("bottom.png", include_bytes!("../assets/bottom.png"));
 const BAR: (&str, &[u8]) = ("bar.png", include_bytes!("../assets/bar.png"));
 const BAR_FOCUSED: (&str, &[u8]) = ("bar-focused.png", include_bytes!("../assets/bar-focused.png"));
@@ -124,6 +127,7 @@ pub fn load_skin() -> (Skin, String) {
         card_tall: load_art(CARD_TALL, &mut notes),
         card_tall_focused: load_art(CARD_TALL_FOCUSED, &mut notes),
         model_box: load_art(MODEL_BOX, &mut notes),
+        triforce: load_art(TRIFORCE, &mut notes),
     };
     (skin, format!("Bottom screen art: {}.", notes.join(", ")))
 }

@@ -12,6 +12,7 @@ card replaces the built-in one when the app starts, so art can be tried without 
 | `card-tall.png`, `card-tall-focused.png` | Option cards with two lines of pills, 304x80. The name goes in y 0-28, the pills in y 28-48 and y 52-72. | Made by Sebastian Neiswanger. |
 | `line.png`, `line-focused.png` | Two-line rows in spoiler logs and credits, 304x44. | Made by Sebastian Neiswanger. |
 | `model-box.png` | The box the spinning model shows in on Models and Voices, 128x106 at x 96, y 88. | Made by Sebastian Neiswanger. |
+| `triforce.png` | The triforce beside the title on the randomizing screen, 128x112, drawn about half size. | Made by Sebastian Neiswanger. |
 | `../icon.png` | The app's icon on the HOME Menu and in the Homebrew Launcher, 48x48. cargo-3ds builds it into the app's SMDH. | Made by Sebastian Neiswanger. |
 | `title.bcfnt` | Font for page names. | Hylia Serif Beta 0.009 by Omni Jacala, https://artsyomni.com/hyliaserif (free, not for profit). |
 | `body.bcfnt` | Font for all other text, converted at 18 pixel glyph cells to match the 18 pixel menu text. | Reggae One by Fontworks, https://github.com/fontworks-fonts/Reggae, under the SIL Open Font License 1.1 (`ReggaeOne-OFL.txt`). |
