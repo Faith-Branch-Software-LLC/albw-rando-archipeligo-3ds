@@ -4,8 +4,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::Mutex;
 
-use crate::draw::{self, CENTER, LEFT, RIGHT};
+use ui_core::menu::{ROW_GAP, ROW_HEIGHT, ROW_LEFT, ROW_TOP, ROW_WIDTH};
+
+use crate::art::Skin;
+use crate::draw::{self, Font, CENTER, LEFT, RIGHT};
 use crate::memory;
+use crate::menu_screen::{self, Sizes};
 
 /// One visible step, with its expected seconds on a New 3DS, from measured runs.
 struct Step {
@@ -188,87 +192,141 @@ impl Screen {
         let elapsed = if finished { *self.final_seconds.get_or_insert(elapsed) } else { elapsed };
 
         let this = &*self;
-        draw::frame(
-            || this.draw_top(overall, eta, elapsed, finished, failure.as_deref()),
-            || this.draw_bottom(finished, failure.is_some()),
-        );
+        let state = State { overall, eta, elapsed, finished, failure: failure.as_deref() };
+        draw::frame(|| this.draw_top(&state), || this.draw_bottom(finished, failure.is_some()));
     }
 
-    fn draw_top(&self, overall: f32, eta: f32, elapsed: f32, finished: bool, failure: Option<&str>) {
-        let accent = match (failure.is_some(), finished) {
-            (true, _) => draw::RED,
-            (false, true) => draw::GREEN,
-            _ => draw::GOLD,
-        };
-        draw::triforce(200.0, 12.0, 20.0, accent);
-        draw::text("A Link Between Worlds", 200.0, 50.0, 0.75, draw::WHITE, CENTER);
-
-        let current = STEP.load(Relaxed) as usize;
-        let status = match (failure, finished) {
+    fn status(state: &State) -> &'static str {
+        match (state.failure, state.finished) {
             (Some(_), _) => "Could not finish",
             (None, true) => "Your seed is ready",
-            _ => STEPS[current].label,
-        };
-        draw::text(status, 24.0, 88.0, 0.58, draw::WHITE, LEFT);
-        draw::text(&format!("{:.0}%", overall * 100.0), 376.0, 88.0, 0.58, accent, RIGHT);
-        draw::bar(24.0, 112.0, 352.0, 16.0, overall, accent, self.tick, !finished);
-
-        match (failure, finished) {
-            (Some(message), _) => {
-                for (index, line) in ui_core::menu::wrap(message, 56).iter().take(3).enumerate() {
-                    draw::text(line, 24.0, 136.0 + index as f32 * 17.0, 0.44, draw::RED, LEFT);
-                }
-            }
-            (None, true) => {
-                for (index, line) in RESULT.lock().unwrap().iter().take(3).enumerate() {
-                    draw::text(line, 24.0, 136.0 + index as f32 * 17.0, 0.44, draw::GREEN, LEFT);
-                }
-            }
-            _ => draw::text(&eta_text(eta), 24.0, 136.0, 0.5, draw::GOLD, LEFT),
-        }
-        draw::text(&clock(elapsed), 376.0, 136.0, 0.5, draw::MUTED, RIGHT);
-
-        if finished {
-            draw::text("A Back to Menu    START Exit", 200.0, 212.0, 0.5, draw::WHITE, CENTER);
-        } else {
-            let model = if self.is_new { "New 3DS" } else { "Old 3DS" };
-            draw::text(&format!("{model}  -  Please keep the console powered"), 200.0, 214.0, 0.42, draw::MUTED, CENTER);
+            _ => STEPS[STEP.load(Relaxed) as usize].label,
         }
     }
 
+    /// Up to three lines under the bar: why it stopped, or what was made.
+    fn result_lines(state: &State) -> Vec<(String, u32)> {
+        match (state.failure, state.finished) {
+            (Some(message), _) => ui_core::menu::wrap(message, 52).into_iter().take(3).map(|line| (line, draw::RED)).collect(),
+            (None, true) => RESULT.lock().unwrap().iter().take(3).map(|line| (line.clone(), draw::GREEN)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The menu's colors and fonts: a night sky, the gold title, and a plum box holding the progress.
+    fn draw_top(&self, state: &State) {
+        let sizes = Sizes::new();
+        let accent = state.accent();
+        draw::gradient(0.0, 0.0, 400.0, 240.0, draw::FOREST, draw::DUSK);
+        draw::triforce(200.0, 10.0, 16.0, draw::GOLD);
+        draw::text_fit(Font::Title, "A Randomizer Between Worlds", 200.0, 40.0, sizes.title, 370.0, draw::GOLD, CENTER);
+
+        let (left, right, top, bottom) = (24.0, 376.0, 82.0, 230.0);
+        draw::framed(left, top, right - left, bottom - top, 2.0, draw::PLUM, draw::PLUM_EDGE);
+        let (inner_left, inner_right) = (left + 14.0, right - 14.0);
+
+        let percent = format!("{:.0} %", state.overall * 100.0);
+        let percent_width = draw::text_width(Font::Title, &percent, sizes.title);
+        let title_top = top + 6.0;
+        let status_room = inner_right - inner_left - percent_width - 8.0;
+        draw::text_fit(Font::Title, Self::status(state), inner_left, title_top, sizes.title, status_room, draw::GOLD, LEFT);
+        draw::text_in(Font::Title, &percent, inner_right, title_top, sizes.title, accent, RIGHT);
+
+        let bar_top = title_top + draw::line_height(sizes.title) + 4.0;
+        draw::bar(inner_left, bar_top, inner_right - inner_left, 14.0, state.overall, accent, self.tick, !state.finished);
+
+        let line = draw::line_height(sizes.text);
+        let info_top = bar_top + 22.0;
+        if !state.finished {
+            draw::text(&eta_text(state.eta), inner_left, info_top, sizes.text, draw::WHITE, LEFT);
+        }
+        draw::text(&clock(state.elapsed), inner_right, info_top, sizes.text, draw::MUTED, RIGHT);
+
+        let lines = Self::result_lines(state);
+        if lines.is_empty() {
+            let model = if self.is_new { "New 3DS" } else { "Old 3DS" };
+            let note = format!("{model}: please keep the console powered.");
+            draw::text_fit(Font::Body, &note, inner_left, bottom - 8.0 - line, sizes.text * 0.85, inner_right - inner_left, draw::MUTED, LEFT);
+        }
+        // A finished run has no time left to show, so its lines start beside the timer.
+        let start = if state.finished { info_top } else { info_top + line };
+        let step = ((bottom - 6.0 - start) / lines.len().max(1) as f32).min(line);
+        for (index, (text, color)) in lines.iter().enumerate() {
+            let width = if index == 0 && state.finished { inner_right - inner_left - 50.0 } else { inner_right - inner_left };
+            draw::text_fit(Font::Body, text, inner_left, start + index as f32 * step, sizes.text * 0.85, width, *color, LEFT);
+        }
+    }
+
+    /// The steps, drawn like the menu's rows: navy with gold edges, the current one glowing.
     fn draw_bottom(&self, finished: bool, failed: bool) {
+        let sizes = Sizes::new();
+        draw::gradient(0.0, 0.0, 320.0, 240.0, draw::DUSK, draw::VIOLET);
         let current = STEP.load(Relaxed) as usize;
-        let row_height = 36.0;
-        let gap = 4.0;
-        for (index, step) in STEPS.iter().enumerate() {
-            let y = 8.0 + index as f32 * (row_height + gap);
+        // Draws the current row last, so its glow lies over its neighbors.
+        let order = (0..STEPS.len()).filter(|&index| index != current).chain([current]);
+        for index in order {
+            let step = &STEPS[index];
+            let y = ROW_TOP + index as f32 * (ROW_HEIGHT + ROW_GAP);
             let complete = index < current || (finished && !failed);
             let active = index == current && !complete;
-            draw::rect(10.0, y, 300.0, row_height, if active { draw::CARD_ACTIVE } else { draw::CARD });
+            if active {
+                draw::glow(ROW_LEFT, y, ROW_WIDTH, ROW_HEIGHT, draw::GOLD);
+            }
+            let (fill, edge) = if active { (draw::NAVY_LIGHT, draw::GOLD) } else { (draw::NAVY, draw::GOLD_EDGE) };
+            draw::framed(ROW_LEFT, y, ROW_WIDTH, ROW_HEIGHT, 2.0, fill, edge);
 
-            let dot = y + 18.0;
+            let dot_x = ROW_LEFT + 18.0;
+            let dot = y + ROW_HEIGHT / 2.0;
             if complete {
-                draw::circle(28.0, dot, 7.0, draw::GREEN);
+                draw::circle(dot_x, dot, 7.0, draw::GREEN);
             } else if active && failed {
-                draw::circle(28.0, dot, 7.0, draw::RED);
+                draw::circle(dot_x, dot, 7.0, draw::RED);
             } else if active {
                 let pulse = ((self.tick as f32 * 0.15).sin() + 1.0) * 1.2;
-                draw::circle(28.0, dot, 5.0 + pulse, draw::GOLD);
+                draw::circle(dot_x, dot, 5.0 + pulse, draw::GOLD);
             } else {
-                draw::circle(28.0, dot, 6.0, draw::DIM);
-                draw::circle(28.0, dot, 4.0, draw::CARD);
+                draw::circle(dot_x, dot, 6.0, draw::GOLD_EDGE);
+                draw::circle(dot_x, dot, 4.0, draw::NAVY_DEEP);
             }
 
+            let label_left = ROW_LEFT + 34.0;
             let color = if complete || active { draw::WHITE } else { draw::MUTED };
-            draw::text(step.label, 44.0, if active { y + 3.0 } else { y + 9.0 }, 0.5, color, LEFT);
+            let scale = sizes.text * if active { 0.9 } else { 1.0 };
+            let label_top = if active { y + 3.0 } else { y + (ROW_HEIGHT - draw::line_height(scale)) / 2.0 };
+            draw::text(step.label, label_left, label_top, scale, color, LEFT);
             if active && !failed {
-                draw::bar(44.0, y + 23.0, 256.0, 7.0, self.best[index], draw::GOLD, self.tick, true);
+                draw::bar(label_left, y + ROW_HEIGHT - 11.0, ROW_LEFT + ROW_WIDTH - 12.0 - label_left, 7.0, self.best[index], draw::GOLD, self.tick, true);
             }
             if complete {
                 let seconds = STEP_ENDS[index].load(Relaxed).wrapping_sub(STEP_STARTS[index].load(Relaxed)) as f32 / 1000.0;
-                draw::text(&clock(seconds), 300.0, y + 10.0, 0.45, draw::GREEN, RIGHT);
+                let top = y + (ROW_HEIGHT - draw::line_height(sizes.text * 0.9)) / 2.0;
+                draw::text(&clock(seconds), ROW_LEFT + ROW_WIDTH - 12.0, top, sizes.text * 0.9, draw::GREEN, RIGHT);
             }
         }
-        draw::text(&format!("Memory {:.1} of {:.1} MB", memory::usage_mb(), self.heap_mb), 160.0, 214.0, 0.42, draw::MUTED, CENTER);
+        let hint = if finished {
+            "A Back to Menu   START Exit".to_owned()
+        } else {
+            format!("Memory {:.1} of {:.1} MB", memory::usage_mb(), self.heap_mb)
+        };
+        menu_screen::draw_hint(&hint, &Skin::default(), sizes);
+    }
+}
+
+/// What the top screen shows this frame.
+struct State<'a> {
+    overall: f32,
+    eta: f32,
+    elapsed: f32,
+    finished: bool,
+    failure: Option<&'a str>,
+}
+
+impl State<'_> {
+    fn accent(&self) -> u32 {
+        match (self.failure.is_some(), self.finished) {
+            (true, _) => draw::RED,
+            (false, true) => draw::GREEN,
+            _ => draw::GOLD,
+        }
     }
 }

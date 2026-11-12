@@ -32,6 +32,8 @@ const OLD_3DS_RESERVE_MB: usize = 18;
 const NEW_3DS_RESERVE_MB: usize = 32;
 /// The heap measured on a real Old 3DS, used when simulating one.
 const OLD_3DS_HEAP: usize = 52 * 1024 * 1024;
+/// Less heap than this on a New 3DS means it opened without the extra memory.
+const NEW_3DS_MIN_HEAP: usize = 80 * 1024 * 1024;
 
 // libctru's default split leaves an Old 3DS about 24 MB of heap. Graphics here need only a few MB
 // of linear memory, so the heap gets the rest. These override weak symbols in libctru.
@@ -40,7 +42,24 @@ const OLD_3DS_HEAP: usize = 52 * 1024 * 1024;
 static mut __ctru_linear_heap_size: u32 = 8 * 1024 * 1024;
 
 extern "C" {
-    static __ctru_heap_size: u32;
+    pub(crate) static __ctru_heap_size: u32;
+}
+
+/// How much memory the console gave the app, for the check log.
+fn memory_report(heap: usize) -> String {
+    // SAFETY: The kernel maps its configuration page read-only into every process, and the system
+    // call only reads a counter.
+    let (memory_type, region, used) = unsafe {
+        let mut used = 0i64;
+        let _ = ctru_sys::svcGetSystemInfo(&mut used, 0, 1);
+        (std::ptr::read_volatile(0x1FF8_0030 as *const u32), std::ptr::read_volatile(0x1FF8_0040 as *const u32), used)
+    };
+    format!(
+        "Memory: app memory type {memory_type}, app region {:.1} MB, used {:.1} MB, heap {:.1} MB",
+        region as f32 / MB,
+        used as f32 / MB,
+        heap as f32 / MB
+    )
 }
 
 fn random_seed() -> u32 {
@@ -259,10 +278,10 @@ fn main() {
             let _ = ctru_sys::osSetSpeedupEnable(true);
         }
     }
-    let new_memory = is_new && !Path::new(job::SIMULATE_OLD).exists();
-
     // SAFETY: libctru sets this once during startup, before main.
     let heap = unsafe { __ctru_heap_size } as usize;
+    // A New 3DS that gave the app no more than an Old 3DS would gets planned for like one.
+    let new_memory = is_new && heap >= NEW_3DS_MIN_HEAP && !Path::new(job::SIMULATE_OLD).exists();
     let reserve = if new_memory { NEW_3DS_RESERVE_MB } else { OLD_3DS_RESERVE_MB };
     memory::start_pool(if new_memory { heap } else { heap.min(OLD_3DS_HEAP) }, reserve * 1024 * 1024);
 
@@ -278,6 +297,7 @@ fn main() {
     let game_location = check.summary.clone();
     let copy_from = check.copy_from;
     let mut check_log = check.details.join("\n");
+    check_log.push_str(&format!("\n{}", memory_report(heap)));
     check_log.push_str(&format!("\n{game_location}\n"));
     let (loaded_icons, icon_note) = icons::load(check);
     check_log.push_str(&format!("{icon_note}\n"));
@@ -297,6 +317,7 @@ fn main() {
         menu.set_player_name(&name);
     }
     menu.apworld_status = apworld_status(share::apworld_version());
+    menu.app_version = env!("CARGO_PKG_VERSION").to_owned();
     if let Ok(text) = fs::read_to_string(AP_OPTIONS) {
         menu.set_ap_options(ui_core::ap_yaml::ApOptions::load(&text));
     }
@@ -304,6 +325,15 @@ fn main() {
     let mut sharing: Option<(share::Share, share::Content, Vec<String>)> = None;
     if !notes.is_empty() {
         menu.show_message("Preset Notes", &notes.join(" "));
+    }
+    if is_new && heap < NEW_3DS_MIN_HEAP {
+        menu.show_message(
+            "Less Memory Than Usual",
+            &format!(
+                "The console gave the app {:.0} MB to work with instead of the New 3DS's usual 96 MB, so it will work like on an Old 3DS. Seeds may take longer.",
+                heap as f32 / MB
+            ),
+        );
     }
     let mut seed_was_typed = false;
     let mut working: Option<progress::Screen> = None;

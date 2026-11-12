@@ -22,13 +22,13 @@ const BADGE_SIZE: f32 = 21.0;
 
 /// Text scales for `TEXT_SIZE` and `TITLE_SIZE`.
 #[derive(Clone, Copy)]
-struct Sizes {
-    text: f32,
-    title: f32,
+pub(crate) struct Sizes {
+    pub(crate) text: f32,
+    pub(crate) title: f32,
 }
 
 impl Sizes {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { text: TEXT_SIZE / 30.0, title: TITLE_SIZE / 30.0 }
     }
 
@@ -250,12 +250,16 @@ fn cover_hint_bar(skin: &Skin) {
     let height = 240.0 - HINT_TOP;
     match skin.background {
         Some(background) => background.part(0.0, HINT_TOP, 320.0, height, 0.0, HINT_TOP, 320.0, height),
-        None => draw::rect(0.0, HINT_TOP, 320.0, height, draw::SKY_BOTTOM),
+        // The art's bar: navy between gold lines.
+        None => {
+            draw::rect(0.0, HINT_TOP, 320.0, height, draw::GOLD_EDGE);
+            draw::rect(0.0, HINT_TOP + 2.0, 320.0, height - 4.0, draw::NAVY_DEEP);
+        }
     }
 }
 
 /// The hint line, such as "A Select   B Back": each control drawn as a button, then what it does.
-fn draw_hint(hint: &str, skin: &Skin, sizes: Sizes) {
+pub(crate) fn draw_hint(hint: &str, skin: &Skin, sizes: Sizes) {
     cover_hint_bar(skin);
     let per_scale = draw::line_height(1.0).max(1.0);
     let badge = BADGE_SIZE;

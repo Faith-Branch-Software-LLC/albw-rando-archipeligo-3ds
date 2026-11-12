@@ -445,6 +445,8 @@ pub struct Menu {
     /// The apworld on the SD card, as the Archipelago page shows it: its version, or that it is missing.
     /// The app sets it when the Archipelago page opens and when a new apworld arrives.
     pub apworld_status: String,
+    /// The app's version, shown on the About page.
+    pub app_version: String,
     /// Lines the sharing page shows: the address, then what has happened.
     share_status: Vec<String>,
     message: (String, Vec<String>),
@@ -530,6 +532,7 @@ impl Menu {
             ap_options: ApOptions::from_rules(&Rules::default().settings()),
             ap_changed: false,
             apworld_status: String::new(),
+            app_version: String::new(),
             share_status: Vec::new(),
             message: (String::new(), Vec::new()),
             held_frames: 0,
@@ -1531,7 +1534,8 @@ impl Menu {
             Page::About => {
                 let mut lines = rows.get(focus).map(|row| vec![row.label.clone(), row.value.clone().unwrap_or_default()]).unwrap_or_default();
                 lines.extend(paragraph(help));
-                ("About and Credits".to_owned(), "Open source under GPL-2.0-or-later".to_owned(), lines, "Up/Down Scroll   B Back")
+                let title = if self.app_version.is_empty() { "About and Credits".to_owned() } else { format!("About and Credits  v{}", self.app_version) };
+                (title, "Open source under GPL-2.0-or-later".to_owned(), lines, "Up/Down Scroll   B Back")
             }
         };
 

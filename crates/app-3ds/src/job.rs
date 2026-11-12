@@ -274,7 +274,28 @@ fn read_copy() -> Result<Option<Vec<u8>>, String> {
     if exheader.len() != 0x400 || exheader[0x200..0x208] != TITLE_ID.to_le_bytes() {
         return Err("exheader.bin is not this game's".to_owned());
     }
-    Ok(Some(exheader))
+    Ok(Some(restore_code_sizes(exheader)?))
+}
+
+/// Start addresses and original sizes of the game's code segments, from its exheader.
+const TEXT: (u32, u32) = (0x0010_0000, 0x0059_211C);
+const RODATA: (u32, u32) = (0x0069_3000, 0x0006_B5F8);
+const DATA_ADDRESS: u32 = 0x006F_F000;
+
+/// Puts back the original code sizes in an exheader.
+///
+/// When a seed is active, Luma hands out the seed's exheader, whose text and rodata sizes the
+/// randomizer grew to fit its own code. Patching on top of that runs out of room
+/// ("rodata segment overflow"). The randomizer changes only these two sizes, so resetting them
+/// gives back the game's own exheader.
+fn restore_code_sizes(mut exheader: Vec<u8>) -> Result<Vec<u8>, String> {
+    let word = |exheader: &[u8], at: usize| u32::from_le_bytes(exheader[at..at + 4].try_into().unwrap());
+    if word(&exheader, 0x10) != TEXT.0 || word(&exheader, 0x20) != RODATA.0 || word(&exheader, 0x30) != DATA_ADDRESS {
+        return Err("the exheader's code layout is not this game's".to_owned());
+    }
+    exheader[0x18..0x1C].copy_from_slice(&TEXT.1.to_le_bytes());
+    exheader[0x28..0x2C].copy_from_slice(&RODATA.1.to_le_bytes());
+    Ok(exheader)
 }
 
 /// Looks for the game files copied to the SD card, then on this console, then on the game card,
@@ -481,7 +502,9 @@ fn random_seed() -> u32 {
 fn run(request: Request) -> Result<(), String> {
     let Request { mut seed, seed_was_typed, settings, mut preset_name, new_memory, model, voice, archipelago } = request;
     log(&format!("App version {}", env!("CARGO_PKG_VERSION")));
-    log(&format!("Console memory: {}", if new_memory { "New 3DS" } else { "Old 3DS" }));
+    // SAFETY: libctru sets this once during startup, before main.
+    let heap_mb = unsafe { crate::__ctru_heap_size } as f32 / (1024.0 * 1024.0);
+    log(&format!("Console memory: {}, heap {heap_mb:.1} MB", if new_memory { "New 3DS" } else { "Old 3DS" }));
     if archipelago.is_none() {
         log(&format!("Seed {seed}, typed by the player: {seed_was_typed}"));
         log(&format!("Preset: {preset_name}"));

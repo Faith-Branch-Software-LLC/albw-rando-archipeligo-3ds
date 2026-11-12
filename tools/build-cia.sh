@@ -14,10 +14,24 @@ CIA=crates/app-3ds/cia
 OUT=target/cia
 mkdir -p "$OUT"
 
-"$BANNERTOOL" makebanner -i "$CIA/banner.png" -a "$CIA/banner.wav" -o "$OUT/banner.bnr"
+# The CIA's version comes from the app's Cargo.toml, so the two always match. The title version
+# holds 6 bits of major, 6 of minor and 4 of micro, so a micro past 15 carries into the minor.
+VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/app-3ds/Cargo.toml | head -n 1)
+MAJOR=${VERSION%%.*}
+REST=${VERSION#*.}
+MINOR=${REST%%.*}
+MICRO=${REST#*.}
+MINOR=$((MINOR + MICRO / 16))
+MICRO=$((MICRO % 16))
+
+# The HOME Menu sound is the app's start sound (friedspin's Cozy UI SFX, which may ship inside the
+# app but not as a loose file, so it stays out of git). Without it, the banner is silent.
+BANNER_SOUND=crates/app-3ds/sounds/start_randomizing.wav
+[ -f "$BANNER_SOUND" ] || BANNER_SOUND="$CIA/banner.wav"
+"$BANNERTOOL" makebanner -i "$CIA/banner.png" -a "$BANNER_SOUND" -o "$OUT/banner.bnr"
 "$MAKEROM" -f cia -o "$OUT/albw-rando.cia" -target t -exefslogo \
   -elf "$BUILT/albw-rando.elf" -rsf "$CIA/app.rsf" \
   -icon "$BUILT/albw-rando.smdh" -banner "$OUT/banner.bnr" \
   -DAPP_TITLE=ALBWRando -DAPP_PRODUCT_CODE=CTR-H-ALBW -DAPP_UNIQUE_ID=0xFA1B0 \
-  -major 0 -minor 1 -micro 0
-echo "Built $OUT/albw-rando.cia"
+  -major "$MAJOR" -minor "$MINOR" -micro "$MICRO"
+echo "Built $OUT/albw-rando.cia, version $VERSION"

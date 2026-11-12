@@ -23,6 +23,18 @@ pub const DIM: u32 = rgba(0x4E, 0x5C, 0x7A, 255);
 pub const WELL: u32 = rgba(0x18, 0x22, 0x3A, 255);
 /// Text on a gold pill.
 pub const INK: u32 = rgba(0x1A, 0x1F, 0x2E, 255);
+/// Colors from the menu art: navy rows with gold edges, and the plum text box on the top screen.
+pub const NAVY: u32 = rgba(0x29, 0x37, 0x68, 255);
+pub const NAVY_LIGHT: u32 = rgba(0x34, 0x46, 0x82, 255);
+pub const NAVY_DEEP: u32 = rgba(0x1A, 0x24, 0x4A, 255);
+pub const GOLD_EDGE: u32 = rgba(0xC9, 0x9A, 0x3A, 255);
+pub const PLUM: u32 = rgba(0x1F, 0x14, 0x30, 255);
+pub const PLUM_EDGE: u32 = rgba(0x6A, 0x3E, 0x8E, 255);
+/// The loading screens' background runs from green at the top of the top screen, through teal where
+/// the screens meet, to purple at the bottom of the bottom screen, like the bottom screen art.
+pub const FOREST: u32 = rgba(0x10, 0x3A, 0x2A, 255);
+pub const DUSK: u32 = rgba(0x16, 0x26, 0x3A, 255);
+pub const VIOLET: u32 = rgba(0x30, 0x14, 0x46, 255);
 const SHINE: u32 = rgba(0xFF, 0xFF, 0xFF, 70);
 
 pub const LEFT: i32 = 0;
@@ -215,6 +227,18 @@ pub fn glow(x: f32, y: f32, w: f32, h: f32, color: u32) {
     }
 }
 
+/// A vertical gradient over a whole screen or box.
+pub fn gradient(x: f32, y: f32, w: f32, h: f32, top: u32, bottom: u32) {
+    // SAFETY: Only called inside `frame`.
+    unsafe { c2d::shim_rect_gradient(x, y, w, h, top, bottom) };
+}
+
+/// A box with a border `edge` pixels wide drawn inside its bounds.
+pub fn framed(x: f32, y: f32, w: f32, h: f32, edge: f32, fill: u32, border: u32) {
+    rect(x, y, w, h, border);
+    rect(x + edge, y + edge, w - 2.0 * edge, h - 2.0 * edge, fill);
+}
+
 pub fn rect(x: f32, y: f32, w: f32, h: f32, color: u32) {
     // SAFETY: Only called inside `frame`.
     unsafe { c2d::shim_rect(x, y, w, h, color) };
@@ -243,18 +267,45 @@ fn pill(x: f32, y: f32, w: f32, h: f32, color: u32) {
     rect(x + radius, y, (w - h).max(0.0), h, color);
 }
 
-/// A rounded bar. A band of light travels along the filled part while work is running.
+/// A rounded bar. A band of light travels along the whole filled part, into the rounded ends,
+/// while work is running.
 pub fn bar(x: f32, y: f32, w: f32, h: f32, fraction: f32, color: u32, tick: u32, animate: bool) {
     pill(x, y, w, h, TRACK);
     let fill = (w * fraction.clamp(0.0, 1.0)).max(h);
     pill(x, y, fill, h, color);
-    let inner = fill - h;
-    if animate && inner > 4.0 {
-        let band = 36.0;
-        let head = (tick as f32 * 2.5) % (inner + band);
-        let start = (head - band).max(0.0);
-        let end = head.min(inner);
-        rect(x + h / 2.0 + start, y, end - start, h, SHINE);
+    // A lighter strip along the top, so the fill looks rounded rather than flat.
+    let radius = h / 2.0;
+    if fill > h {
+        rect(x + radius, y + h * 0.18, fill - h, (h * 0.22).max(1.0), rgba(0xFF, 0xFF, 0xFF, 40));
+    }
+    if !animate || fill < h + 4.0 {
+        return;
+    }
+    // The band is drawn in thin columns. Each column is cut to the pill's outline where it passes
+    // over a rounded end, and is brightest in the middle of the band.
+    let band = 40.0;
+    let head = (tick as f32 * 2.5) % (fill + band);
+    let column = 2.0;
+    let mut left = (head - band).max(0.0);
+    while left < head.min(fill) {
+        let right = (left + column).min(head).min(fill);
+        let middle = (left + right) / 2.0;
+        // How far into a rounded end the column is, from the end's center.
+        let into_end = if middle < radius {
+            radius - middle
+        } else if middle > fill - radius {
+            middle - (fill - radius)
+        } else {
+            0.0
+        };
+        let half = (radius * radius - into_end * into_end).max(0.0).sqrt();
+        let along = ((middle - (head - band)) / band).clamp(0.0, 1.0);
+        let strength = 1.0 - (along * 2.0 - 1.0).abs();
+        let alpha = (SHINE >> 24) as f32 * 1.6 * strength;
+        if half > 0.3 && alpha >= 1.0 {
+            rect(x + left, y + radius - half, right - left, half * 2.0, (SHINE & 0x00FF_FFFF) | ((alpha.min(255.0) as u32) << 24));
+        }
+        left = right;
     }
 }
 
