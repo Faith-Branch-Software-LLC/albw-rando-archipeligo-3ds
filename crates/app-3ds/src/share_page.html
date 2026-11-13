@@ -20,6 +20,7 @@
   #drop { border: 2px dashed #3a4152; border-radius: 10px; padding: 22px; text-align: center; color: var(--muted); }
   #drop.over { border-color: var(--gold); color: var(--ink); }
   #status { min-height: 1.5em; margin-top: 10px; }
+  #sending { width: 100%; height: 10px; margin-top: 10px; accent-color: var(--gold); }
   .good { color: var(--good); } .bad { color: var(--bad); }
   code { color: var(--ink); }
   #update { border: 1px solid var(--gold); }
@@ -55,12 +56,31 @@
     <h2>3. Send files to the 3DS</h2>
     <p>After the host generates, send the <code>.apalbw3ds</code> file with your name on it.</p>
     <div id="drop">Drop the file here, or <label><u>choose it</u><input id="file" type="file" accept=".apalbw3ds,.apworld" hidden></label></div>
+    <progress id="sending" max="1" value="0" hidden></progress>
     <div id="status"></div>
   </section>
 </main>
 <script>
   const statusLine = document.getElementById("status");
   function say(text, kind) { statusLine.textContent = text; statusLine.className = kind || ""; }
+  const bar = document.getElementById("sending");
+
+  // fetch() can't report upload progress, so this uses XMLHttpRequest for the bar.
+  function post(route, file) {
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open("POST", route);
+      request.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+      request.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        bar.value = event.loaded / event.total;
+        say("Sending " + file.name + ": " + Math.floor(100 * event.loaded / event.total) + "%");
+      };
+      request.onload = () => resolve({ ok: request.status >= 200 && request.status < 300, text: request.responseText });
+      request.onerror = () => reject(new Error("network"));
+      request.send(file);
+    });
+  }
 
   async function send(file) {
     const name = file.name.toLowerCase();
@@ -70,13 +90,15 @@
       return;
     }
     say("Sending " + file.name + "...");
+    bar.value = 0;
+    bar.hidden = false;
     try {
-      const reply = await fetch(route, { method: "POST", headers: { "X-File-Name": encodeURIComponent(file.name) }, body: file });
-      const text = await reply.text();
-      say(text, reply.ok ? "good" : "bad");
+      const reply = await post(route, file);
+      say(reply.text, reply.ok ? "good" : "bad");
     } catch (err) {
       say("The 3DS did not answer. Check that it is still on the sharing page.", "bad");
     }
+    bar.hidden = true;
   }
 
   document.getElementById("file").addEventListener("change", (event) => { if (event.target.files[0]) send(event.target.files[0]); });

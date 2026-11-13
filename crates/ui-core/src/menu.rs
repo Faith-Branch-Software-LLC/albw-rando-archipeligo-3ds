@@ -432,6 +432,8 @@ pub struct View {
     pub total_rows: usize,
     pub content_height: f32,
     pub layout: Layout,
+    /// How far a file has arrived, from 0 to 1, for a bar on the top screen.
+    pub progress: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -493,6 +495,8 @@ pub struct Menu {
     pub app_version: String,
     /// Lines the sharing page shows: the address, then what has happened.
     share_status: Vec<String>,
+    /// How far a file sent to the sharing page has arrived.
+    share_progress: Option<f32>,
     message: (String, Vec<String>),
     held_frames: u32,
     touch: Option<Touch>,
@@ -583,6 +587,7 @@ impl Menu {
             apworld_status: String::new(),
             app_version: String::new(),
             share_status: Vec::new(),
+            share_progress: None,
             message: (String::new(), Vec::new()),
             held_frames: 0,
             touch: None,
@@ -722,12 +727,18 @@ impl Menu {
     /// Opens the sharing page with its first status lines.
     pub fn show_sharing(&mut self, lines: Vec<String>) {
         self.share_status = lines;
+        self.share_progress = None;
         self.open(Page::Sharing);
     }
 
     /// Replaces the sharing page's status lines.
     pub fn set_share_status(&mut self, lines: Vec<String>) {
         self.share_status = lines;
+    }
+
+    /// Shows how far a file sent to the sharing page has arrived, or hides the bar for None.
+    pub fn set_share_progress(&mut self, fraction: Option<f32>) {
+        self.share_progress = fraction.map(|fraction| fraction.clamp(0.0, 1.0));
     }
 
     /// The options file for the current rules and player name.
@@ -920,21 +931,18 @@ impl Menu {
             ],
             Page::Home => {
                 let mut rows = Vec::new();
+                // Without the game files, nothing else works yet, so the page offers only the copy,
+                // or says how to get the game when it can't be copied.
+                if !self.has_game {
+                    rows.push(if self.can_copy_game {
+                        row("Copy Game Files", None, "Starts your game once to copy the files the randomizer needs to the SD card, about 300 MB, then comes back here. Needs Luma's plugin loader. Everything else unlocks once the files are copied.", Target::CopyGameFiles)
+                    } else {
+                        row("Game Files Needed", None, "Install A Link Between Worlds (USA) from a game card or the eShop, then reopen the app to copy its files. Or put your own decrypted dump at /3ds/albw-rando/game.cci.", Target::Nothing)
+                    });
+                    return rows;
+                }
                 if self.can_copy_game {
                     rows.push(row("Copy Game Files", None, "Starts your game once to copy the files the randomizer needs to the SD card, about 300 MB, then comes back here. Needs Luma's plugin loader.", Target::CopyGameFiles));
-                }
-                if !self.has_game {
-                    rows.push(row("Game Files Needed", None, "Rules, presets, models and Archipelago unlock once the app can read your game. Install A Link Between Worlds (USA) and choose Copy Game Files, or put your own decrypted dump at /3ds/albw-rando/game.cci, then reopen the app.", Target::Nothing));
-                    if !self.use_modmoon {
-                        rows.push(row("Your Seeds", None, "Pick which seed the game plays, or play it unrandomized. Seeds are kept in /3ds/albw-rando/seeds.", Target::ListSeeds));
-                    }
-                    rows.extend([
-                        row("Spoiler Logs", None, "Look up where items are in seeds you made before.", Target::ListSpoilers),
-                        row("App Settings", None, "Settings for the app itself.", Target::Open(Page::AppSettings)),
-                        row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
-                        row("Exit", None, "Close the app.", Target::Exit),
-                    ]);
-                    return rows;
                 }
                 rows.extend([
                 row("Make a Seed", None, "Pick the seed number, review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
@@ -1549,6 +1557,10 @@ impl Menu {
             if self.page() == Page::AskSeedSwitcher {
                 return Action::None;
             }
+            // The home page has no Exit row before the game files are there.
+            if self.page() == Page::Home && !self.has_game {
+                return Action::Exit;
+            }
             return self.back();
         }
         if pressed.y && self.page() == Page::Mods {
@@ -1599,7 +1611,11 @@ impl Menu {
                 let mut lines = paragraph(&self.game_location);
                 lines.push(String::new());
                 lines.extend(paragraph(help));
-                let hint = if self.has_game { "A Select   START Make a Seed" } else { "A Select" };
+                let hint = match (self.has_game, self.can_copy_game) {
+                    (true, _) => "A Select   START Make a Seed",
+                    (false, true) => "A Copy   B Exit",
+                    (false, false) => "B Exit",
+                };
                 ("A Link Between Worlds".to_owned(), "Randomizer".to_owned(), lines, hint)
             }
             Page::Categories => ("Rules".to_owned(), format!("Preset: {}", self.preset_name), paragraph(help), "A Open   B Back"),
@@ -1734,6 +1750,7 @@ impl Menu {
             total_rows: rows.len(),
             content_height: layout.content_height(&heights),
             layout,
+            progress: if place.page == Page::Sharing { self.share_progress } else { None },
         }
     }
 }
@@ -2250,11 +2267,16 @@ mod tests {
     fn home_hides_settings_without_the_game() {
         let mut menu = menu();
         menu.has_game = false;
-        let labels: Vec<String> = menu.view().rows.iter().map(|row| row.label.clone()).collect();
-        assert_eq!(labels, ["Game Files Needed", "Spoiler Logs", "App Settings", "About and Credits", "Exit"]);
+        let labels = |menu: &Menu| menu.view().rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&menu), ["Game Files Needed"]);
+        menu.can_copy_game = true;
+        assert_eq!(labels(&menu), ["Copy Game Files"]);
         press(&mut menu, |b| b.start = true);
         release(&mut menu);
         assert_eq!(menu.page(), Page::Home);
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::CopyGameFiles);
+        release(&mut menu);
+        assert_eq!(press(&mut menu, |b| b.b = true), Action::Exit);
     }
 
     #[test]

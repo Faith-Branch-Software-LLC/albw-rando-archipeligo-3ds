@@ -164,6 +164,19 @@ fn draw_top_art(view: &View, art: *mut c_void, sizes: Sizes) {
     for (index, line) in lines.iter().enumerate() {
         draw::text(line, BOX_LEFT, body_top + index as f32 * step, scale, draw::WHITE, LEFT);
     }
+    if let Some(fraction) = view.progress {
+        progress_bar(BOX_LEFT, BOX_BOTTOM - 10.0, BOX_RIGHT - BOX_LEFT, fraction);
+    }
+}
+
+/// A bar for how far a file has arrived.
+fn progress_bar(left: f32, top: f32, width: f32, fraction: f32) {
+    const HEIGHT: f32 = 8.0;
+    draw::rounded_rect(left, top, width, HEIGHT, HEIGHT / 2.0, draw::WELL);
+    let filled = width * fraction.clamp(0.0, 1.0);
+    if filled >= HEIGHT {
+        draw::rounded_rect(left, top, filled, HEIGHT, HEIGHT / 2.0, draw::GOLD);
+    }
 }
 
 fn draw_top(view: &View, sizes: Sizes) {
@@ -176,6 +189,9 @@ fn draw_top(view: &View, sizes: Sizes) {
     let step = draw::line_height(sizes.text);
     for (index, line) in lines.iter().take(((240.0 - 98.0) / step) as usize).enumerate() {
         draw::text(line, 24.0, 98.0 + index as f32 * step, sizes.text, draw::WHITE, LEFT);
+    }
+    if let Some(fraction) = view.progress {
+        progress_bar(24.0, 222.0, 352.0, fraction);
     }
 }
 

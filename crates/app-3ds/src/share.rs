@@ -80,6 +80,16 @@ struct Connection {
     idle: u32,
     /// When the connection opened, to log how long uploads take.
     opened: std::time::Instant,
+    /// A file on its way in: what it is, the bytes of it read so far, and its size.
+    upload: Option<(&'static str, usize, usize)>,
+}
+
+/// A file arriving from the computer, for the sharing page's bar.
+pub struct Upload {
+    /// "patch" or "apworld".
+    pub kind: &'static str,
+    pub received: usize,
+    pub total: usize,
 }
 
 pub struct Share {
@@ -169,6 +179,15 @@ impl Share {
         }
     }
 
+    /// The largest file that is arriving now, if any.
+    pub fn upload(&self) -> Option<Upload> {
+        self.connections
+            .iter()
+            .filter_map(|connection| connection.upload)
+            .max_by_key(|&(_, _, total)| total)
+            .map(|(kind, received, total)| Upload { kind, received, total })
+    }
+
     /// Does one frame of work. Call it every frame while the sharing page shows.
     pub fn poll(&mut self, content: &Content) -> Vec<Event> {
         let mut events = Vec::new();
@@ -212,7 +231,7 @@ impl Share {
                 }
             }
             set_receive_buffer(&stream);
-            self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0, opened: std::time::Instant::now() });
+            self.connections.push(Connection { stream, state: State::Reading(Vec::new()), idle: 0, opened: std::time::Instant::now(), upload: None });
         }
 
         let status = status_json(content);
@@ -282,6 +301,14 @@ fn step(connection: &mut Connection, content: &Content, status: &str, events: &m
                     continue;
                 }
                 let end = request.body_start + request.content_length;
+                let kind = match request.path.as_str() {
+                    "/patch" => Some("patch"),
+                    "/apworld" => Some("apworld"),
+                    _ => None,
+                };
+                connection.upload = kind
+                    .filter(|_| request.method == "POST" && buffer.len() < end)
+                    .map(|kind| (kind, buffer.len() - request.body_start, request.content_length));
                 if buffer.len() < end {
                     // Grow once to the full size, instead of doubling past it.
                     buffer.reserve_exact(end - buffer.len());

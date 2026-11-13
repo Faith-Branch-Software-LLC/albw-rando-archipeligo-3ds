@@ -337,7 +337,7 @@ fn main() {
     menu.has_game = has_game;
     menu.modmoon_installed = job::modmoon_installed();
     menu.use_modmoon = job::uses_modmoon();
-    if menu.modmoon_installed && job::saved_seed_switcher().is_none() {
+    if has_game && menu.modmoon_installed && job::saved_seed_switcher().is_none() {
         menu.ask_seed_switcher();
     }
     if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
@@ -467,6 +467,16 @@ fn main() {
                     }
                 }
                 let mut lines = server.address_lines();
+                let upload = server.upload();
+                if let Some(upload) = &upload {
+                    let mb = |bytes: usize| bytes as f32 / (1024.0 * 1024.0);
+                    lines.push(if upload.total >= 1024 * 1024 {
+                        format!("Receiving {}: {:.1} of {:.1} MB", upload.kind, mb(upload.received), mb(upload.total))
+                    } else {
+                        format!("Receiving {}: {} of {} KB", upload.kind, upload.received / 1024, upload.total.div_ceil(1024))
+                    });
+                }
+                menu.set_share_progress(upload.map(|upload| upload.received as f32 / upload.total.max(1) as f32));
                 lines.extend(received.iter().rev().take(3).cloned());
                 if received.iter().any(|line| line.ends_with(&format!(".{}", ap_patch::EXTENSION))) {
                     lines.push("Press B, then open Patch Files to apply it.".to_owned());
