@@ -219,6 +219,12 @@ pub enum Action {
     EditPlayerName,
     /// Start the installed game with the plugin that copies its files to the SD card.
     CopyGameFiles,
+    /// List the seeds in the app's folder, then call `show_seeds`.
+    ListSeeds,
+    /// Make the seed with this folder name the one the game plays, or play unrandomized for None.
+    UseSeed(Option<String>),
+    /// Save who switches seeds: true for ModMoon, false for this app.
+    SetSeedSwitcher(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -254,6 +260,24 @@ pub enum Page {
     Patches,
     /// One Archipelago patch, ready to apply.
     Patch,
+    /// The seeds in the app's folder, to pick the one the game plays. Only when the app switches
+    /// seeds.
+    Seeds,
+    /// Asked once when ModMoon is installed: should ModMoon or this app switch seeds?
+    AskSeedSwitcher,
+    /// Settings for the app itself, not for seeds.
+    AppSettings,
+}
+
+/// A seed in the app's folder, for the seeds page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeedEntry {
+    /// The folder's name in /3ds/albw-rando/seeds. Empty for a mod this app did not make.
+    pub name: String,
+    pub title: String,
+    pub details: String,
+    /// The game plays this one now.
+    pub active: bool,
 }
 
 /// What the app read from an Archipelago patch, for the confirm page.
@@ -343,6 +367,11 @@ enum Target {
     ApDefaults,
     Look(Look),
     ApplyPatch,
+    ListSeeds,
+    /// A seed by index into `seeds`, or None to play unrandomized.
+    Seed(Option<usize>),
+    /// Picks who switches seeds: true for ModMoon.
+    SeedSwitcher(bool),
     CopyGameFiles,
     /// A spoiler entry, or a row that does nothing.
     Nothing,
@@ -426,6 +455,10 @@ pub struct Menu {
     /// False when the app found no game files it can read. The home page then hides everything
     /// that needs them, so rules can't be changed for a seed that can't be made.
     pub has_game: bool,
+    /// True when ModMoon is on the SD card, so the player can pick it to switch seeds.
+    pub modmoon_installed: bool,
+    /// True when ModMoon switches seeds. The app then puts each seed in a new ModMoon slot.
+    pub use_modmoon: bool,
     presets: Vec<Preset>,
     /// True once a rule changes on the rules pages, until the player leaves them.
     rules_changed: bool,
@@ -443,6 +476,7 @@ pub struct Menu {
     spoiler_items: Vec<(String, usize)>,
     /// Names of the Archipelago patch files, without the folder.
     patch_files: Vec<String>,
+    seeds: Vec<SeedEntry>,
     patch: PatchSummary,
     /// Choices for each `Look`, as indexes into `LOOK_CHOICES`.
     looks: [usize; 2],
@@ -527,6 +561,8 @@ impl Menu {
             game_location: String::new(),
             can_copy_game: false,
             has_game: true,
+            modmoon_installed: false,
+            use_modmoon: true,
             presets,
             rules_changed: false,
             replacing: None,
@@ -538,6 +574,7 @@ impl Menu {
             found: Vec::new(),
             spoiler_items: Vec::new(),
             patch_files: Vec::new(),
+            seeds: Vec::new(),
             patch: PatchSummary::default(),
             looks: [0; 2],
             player_name: "Player".to_owned(),
@@ -644,6 +681,24 @@ impl Menu {
         }
         self.spoiler_files = names;
         self.open(Page::Spoilers);
+    }
+
+    /// Asks whether ModMoon or this app should switch seeds. The answer comes back as
+    /// `Action::SetSeedSwitcher`.
+    pub fn ask_seed_switcher(&mut self) {
+        self.open(Page::AskSeedSwitcher);
+    }
+
+    /// Shows the seeds page, or refreshes it in place when it is already open.
+    pub fn show_seeds(&mut self, seeds: Vec<SeedEntry>) {
+        self.seeds = seeds;
+        if self.page() == Page::Seeds {
+            let count = self.rows().len();
+            let place = self.place_mut();
+            place.focus = place.focus.min(count - 1);
+        } else {
+            self.open(Page::Seeds);
+        }
     }
 
     /// Lists the Archipelago patch files. With none, says how to get one.
@@ -870,8 +925,12 @@ impl Menu {
                 }
                 if !self.has_game {
                     rows.push(row("Game Files Needed", None, "Rules, presets, models and Archipelago unlock once the app can read your game. Install A Link Between Worlds (USA) and choose Copy Game Files, or put your own decrypted dump at /3ds/albw-rando/game.cci, then reopen the app.", Target::Nothing));
+                    if !self.use_modmoon {
+                        rows.push(row("Your Seeds", None, "Pick which seed the game plays, or play it unrandomized. Seeds are kept in /3ds/albw-rando/seeds.", Target::ListSeeds));
+                    }
                     rows.extend([
                         row("Spoiler Logs", None, "Look up where items are in seeds you made before.", Target::ListSpoilers),
+                        row("App Settings", None, "Settings for the app itself.", Target::Open(Page::AppSettings)),
                         row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
                         row("Exit", None, "Close the app.", Target::Exit),
                     ]);
@@ -879,11 +938,17 @@ impl Menu {
                 }
                 rows.extend([
                 row("Make a Seed", None, "Pick the seed number, review your rules, then build a randomized game.", Target::Open(Page::Confirm)),
+                ]);
+                if !self.use_modmoon {
+                    rows.push(row("Your Seeds", None, "Pick which seed the game plays, or play it unrandomized. Seeds are kept in /3ds/albw-rando/seeds.", Target::ListSeeds));
+                }
+                rows.extend([
                 row("Rules", None, "Change every option by hand.", Target::Open(Page::Categories)),
                 row("Presets", Some(self.preset_name.clone()), "Load a set of rules, or save your own to share.", Target::Open(Page::Presets)),
                 row("Models and Voices", None, "Choose a player model and voice pack for this seed.", Target::Open(Page::Mods)),
                 row("Spoiler Logs", None, "Stuck? Look up where items are in seeds you made, and search by item or place.", Target::ListSpoilers),
                 row("Archipelago", None, "Play in a multiworld: send your options to the host, then patch your game from their file.", Target::Open(Page::Archipelago)),
+                row("App Settings", None, "Settings for the app itself.", Target::Open(Page::AppSettings)),
                 row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
                 row("Exit", None, "Close the app.", Target::Exit),
                 ]);
@@ -995,6 +1060,35 @@ impl Menu {
                 })
                 .collect(),
             Page::Sharing => vec![row("Stop Sharing", None, "", Target::Back)],
+            Page::AskSeedSwitcher => vec![
+                row("Use ModMoon", None, "Each new seed goes into a new ModMoon slot. Switch seeds in ModMoon, like your other mods.", Target::SeedSwitcher(true)),
+                row("Use This App", None, "Switch seeds under Your Seeds in this app. Turn off ModMoon's mod for A Link Between Worlds first, or ModMoon takes over the active seed.", Target::SeedSwitcher(false)),
+            ],
+            Page::AppSettings => {
+                let (value, help, target) = match (self.modmoon_installed, self.use_modmoon) {
+                    (false, _) => ("This App", "ModMoon isn't on the SD card, so this app switches seeds under Your Seeds.", Target::Nothing),
+                    (true, true) => ("ModMoon", "Each new seed goes into a new ModMoon slot, and you switch seeds in ModMoon. Press A to switch them in this app instead.", Target::SeedSwitcher(false)),
+                    (true, false) => (
+                        "This App",
+                        "You switch seeds under Your Seeds. Press A to use ModMoon instead. The active seed then goes back to /3ds/albw-rando/seeds.",
+                        Target::SeedSwitcher(true),
+                    ),
+                };
+                vec![row("Switch Seeds With", Some(value.to_owned()), help, target)]
+            }
+            Page::Seeds => {
+                let none_active = !self.seeds.iter().any(|seed| seed.active);
+                let mut rows = vec![row(
+                    "Play Unrandomized",
+                    none_active.then(|| "Active".to_owned()),
+                    "Moves the active seed back to /3ds/albw-rando/seeds, so the game starts as it came.",
+                    Target::Seed(None),
+                )];
+                rows.extend(self.seeds.iter().enumerate().map(|(index, seed)| {
+                    row(&seed.title, seed.active.then(|| "Active".to_owned()), &seed.details, Target::Seed(Some(index)))
+                }));
+                rows
+            }
             Page::Patches => self
                 .patch_files
                 .iter()
@@ -1131,6 +1225,19 @@ impl Menu {
                 Action::None
             }
             Target::Nothing => Action::None,
+            Target::ListSeeds => Action::ListSeeds,
+            Target::SeedSwitcher(use_modmoon) => {
+                if self.page() == Page::AskSeedSwitcher {
+                    self.stack.pop();
+                }
+                self.use_modmoon = use_modmoon;
+                Action::SetSeedSwitcher(use_modmoon)
+            }
+            Target::Seed(None) => Action::UseSeed(None),
+            Target::Seed(Some(index)) => match &self.seeds[index] {
+                seed if seed.active || seed.name.is_empty() => Action::None,
+                seed => Action::UseSeed(Some(seed.name.clone())),
+            },
         }
     }
 
@@ -1439,12 +1546,16 @@ impl Menu {
             if self.page() == Page::OldWarning {
                 return Action::Exit;
             }
+            if self.page() == Page::AskSeedSwitcher {
+                return Action::None;
+            }
             return self.back();
         }
         if pressed.y && self.page() == Page::Mods {
             return Action::PlayVoice;
         }
-        if pressed.start && self.has_game && self.page() != Page::OldWarning && self.page() != Page::Confirm {
+        let question = matches!(self.page(), Page::OldWarning | Page::AskSeedSwitcher | Page::Confirm);
+        if pressed.start && self.has_game && !question {
             self.open(Page::Confirm);
         }
         Action::None
@@ -1559,6 +1670,14 @@ impl Menu {
                 "B Stop Sharing",
             ),
             Page::Patches => ("Archipelago".to_owned(), "Patch files from your host".to_owned(), paragraph(help), "A Open   B Back"),
+            Page::AskSeedSwitcher => (
+                "ModMoon Found".to_owned(),
+                "Who should switch seeds?".to_owned(),
+                paragraph(help),
+                "A Select",
+            ),
+            Page::AppSettings => ("App Settings".to_owned(), String::new(), paragraph(help), "A Change   B Back"),
+            Page::Seeds => ("Your Seeds".to_owned(), "The game plays the active one".to_owned(), paragraph(help), "A Use   B Back"),
             Page::Patch => {
                 let mut lines = vec![
                     format!("Player: {}", self.patch.player),
@@ -1689,8 +1808,8 @@ mod tests {
     #[test]
     fn long_lists_scroll_to_keep_focus_visible() {
         let mut menu = menu();
-        // Exit is the eighth Home row, below the screen until the list scrolls.
-        for _ in 0..7 {
+        // Exit is the ninth Home row, below the screen until the list scrolls.
+        for _ in 0..8 {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }
@@ -2028,6 +2147,57 @@ mod tests {
     }
 
     #[test]
+    fn seeds_page_switches_the_active_seed() {
+        let mut menu = menu();
+        menu.use_modmoon = true;
+        assert!(!menu.view().rows.iter().any(|row| row.label == "Your Seeds"));
+        menu.use_modmoon = false;
+        menu.place_mut().focus = 1;
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::ListSeeds);
+        release(&mut menu);
+        let seed = |name: &str, active: bool| SeedEntry { name: name.into(), title: name.into(), details: String::new(), active };
+        menu.show_seeds(vec![seed("0002-seed-9", true), seed("0001-seed-4", false)]);
+        assert_eq!(menu.page(), Page::Seeds);
+        let view = menu.view();
+        assert_eq!(view.rows.len(), 3);
+        assert_eq!(view.rows[0].value, None);
+        assert_eq!(view.rows[1].value.as_deref(), Some("Active"));
+        menu.place_mut().focus = 1;
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::None);
+        release(&mut menu);
+        menu.place_mut().focus = 2;
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::UseSeed(Some("0001-seed-4".into())));
+        release(&mut menu);
+        menu.show_seeds(vec![seed("0002-seed-9", false), seed("0001-seed-4", true)]);
+        assert_eq!(menu.page(), Page::Seeds);
+        assert_eq!(menu.place().focus, 2);
+        menu.place_mut().focus = 0;
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::UseSeed(None));
+    }
+
+    #[test]
+    fn modmoon_question_must_be_answered_and_settings_can_change_it() {
+        let mut menu = menu();
+        menu.modmoon_installed = true;
+        menu.ask_seed_switcher();
+        assert_eq!(press(&mut menu, |b| b.b = true), Action::None);
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::AskSeedSwitcher);
+        menu.place_mut().focus = 1;
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::SetSeedSwitcher(false));
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::Home);
+        assert!(!menu.use_modmoon);
+
+        menu.open(Page::AppSettings);
+        assert_eq!(menu.view().rows[0].value.as_deref(), Some("This App"));
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::SetSeedSwitcher(true));
+        release(&mut menu);
+        assert_eq!(menu.page(), Page::AppSettings);
+        assert_eq!(menu.view().rows[0].value.as_deref(), Some("ModMoon"));
+    }
+
+    #[test]
     fn spoiler_logs_open_from_home_and_search() {
         let mut menu = menu();
         menu.place_mut().focus = 4;
@@ -2081,7 +2251,7 @@ mod tests {
         let mut menu = menu();
         menu.has_game = false;
         let labels: Vec<String> = menu.view().rows.iter().map(|row| row.label.clone()).collect();
-        assert_eq!(labels, ["Game Files Needed", "Spoiler Logs", "About and Credits", "Exit"]);
+        assert_eq!(labels, ["Game Files Needed", "Spoiler Logs", "App Settings", "About and Credits", "Exit"]);
         press(&mut menu, |b| b.start = true);
         release(&mut menu);
         assert_eq!(menu.page(), Page::Home);

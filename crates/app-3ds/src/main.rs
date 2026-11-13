@@ -335,6 +335,11 @@ fn main() {
     menu.game_location = game_location;
     menu.can_copy_game = copy_from.is_some();
     menu.has_game = has_game;
+    menu.modmoon_installed = job::modmoon_installed();
+    menu.use_modmoon = job::uses_modmoon();
+    if menu.modmoon_installed && job::saved_seed_switcher().is_none() {
+        menu.ask_seed_switcher();
+    }
     if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
         menu.set_player_name(&name);
     }
@@ -533,6 +538,30 @@ fn main() {
                 }
             }
             Action::ListPatches => menu.show_patches(job::list_patches()),
+            Action::ListSeeds => menu.show_seeds(job::list_seeds()),
+            Action::SetSeedSwitcher(use_modmoon) => {
+                if let Err(text) = job::save_seed_switcher(use_modmoon) {
+                    menu.show_message("Can't Save the Choice", &text);
+                } else if use_modmoon && job::list_seeds().iter().any(|seed| seed.active && !seed.name.is_empty()) {
+                    // ModMoon would take the app's active seed into its own slot when it opens.
+                    match job::use_seed(None) {
+                        Ok(_) => menu.show_message(
+                            "ModMoon Switches Seeds",
+                            "The active seed went back to /3ds/albw-rando/seeds. New seeds go into ModMoon slots.",
+                        ),
+                        Err(text) => menu.show_message("Can't Put the Seed Back", &text),
+                    }
+                }
+            }
+            Action::UseSeed(name) => {
+                let result = job::use_seed(name.as_deref());
+                menu.show_seeds(job::list_seeds());
+                match result {
+                    Ok(text) if name.is_some() => menu.show_message("Seed Active", &text),
+                    Ok(text) => menu.show_message("Playing Unrandomized", &text),
+                    Err(text) => menu.show_message("Can't Switch Seeds", &text),
+                }
+            }
             Action::EditPlayerName => edit_player_name(&mut menu, &apt, &gfx),
             Action::StartSharing => match share::Share::start() {
                 Ok(server) => {

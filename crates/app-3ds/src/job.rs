@@ -35,7 +35,14 @@ const APP_TITLE_ID: u64 = 0x0004_0000_0FA1_B000;
 const EXHEADER: &str = "sdmc:/3ds/albw-rando/exheader.bin";
 const BUILD_DIR: &str = "sdmc:/3ds/albw-rando/build";
 const SPILL_DIR: &str = "sdmc:/3ds/albw-rando/tmp";
+/// Seeds made without ModMoon, one folder each, named `NNNN-seed-<seed>`. The active one is moved
+/// to the game's Luma folder and moved back when another one is chosen.
 const SEED_LIBRARY: &str = "sdmc:/3ds/albw-rando/seeds";
+/// Written in the game's Luma folder while it holds a seed from the library. Names that seed's
+/// folder, so it goes back under the same name. A Luma folder without it holds someone else's mod.
+const ACTIVE_NOTE: &str = "albw-rando-seed.txt";
+/// Who switches seeds when ModMoon is installed: `modmoon` or `app`. Missing until the player picks.
+const SEED_SWITCHER: &str = "sdmc:/3ds/albw-rando/seed-switching.txt";
 /// One `NNNN-seed-<seed>.json` per seed made. The number grows, so names sort oldest first.
 pub const SPOILER_DIR: &str = "sdmc:/3ds/albw-rando/spoilers";
 /// Archipelago patch files from the host, `.apalbw3ds`.
@@ -482,23 +489,192 @@ fn modmoon_slot(id: &str) -> (String, String) {
     (parent, format!("Slot_{slot}"))
 }
 
+/// True when ModMoon is installed.
+pub fn modmoon_installed() -> bool {
+    Path::new(MODMOON_ROOT).is_dir()
+}
+
+/// The saved choice of who switches seeds: Some(true) for ModMoon, Some(false) for this app.
+pub fn saved_seed_switcher() -> Option<bool> {
+    match fs::read_to_string(SEED_SWITCHER).ok()?.trim() {
+        "modmoon" => Some(true),
+        "app" => Some(false),
+        _ => None,
+    }
+}
+
+pub fn save_seed_switcher(use_modmoon: bool) -> Result<(), String> {
+    let _ = fs::create_dir_all(APP_DIR);
+    fs::write(SEED_SWITCHER, if use_modmoon { "modmoon\n" } else { "app\n" }).map_err(|err| format!("Could not save the choice: {err}"))
+}
+
+/// True when ModMoon switches seeds, so the app only fills its slots. With ModMoon installed and
+/// no choice saved yet, ModMoon does, as before the choice existed.
+pub fn uses_modmoon() -> bool {
+    modmoon_installed() && saved_seed_switcher() != Some(false)
+}
+
+/// The ModMoon slot that ModMoon has moved to the game's Luma folder, if any. ModMoon moves that
+/// folder back into the slot when it opens, so the app must not put a seed there meanwhile.
+fn modmoon_active_slot() -> Option<u32> {
+    let settings = fs::read_to_string(MODMOON_SETTINGS).ok()?;
+    ui_core::modmoon::active_slot(&settings, TITLE_ID)
+}
+
+/// The game's Luma folder, where the seed or mod that the game plays lives.
+fn active_folder() -> String {
+    format!("{LUMA_TITLES}/{TITLE_ID:016X}")
+}
+
+/// What the game's Luma folder holds: None when it is missing, Some("") for a mod this app did
+/// not make, or Some(name) for the library seed with that folder name.
+fn active_seed() -> Option<String> {
+    let folder = active_folder();
+    if !Path::new(&folder).is_dir() {
+        return None;
+    }
+    let note = fs::read_to_string(format!("{folder}/{ACTIVE_NOTE}")).unwrap_or_default();
+    let name = note.trim();
+    Some(if is_seed_name(name) { name.to_owned() } else { String::new() })
+}
+
+/// A folder name that stays inside the library.
+fn is_seed_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
+}
+
+/// The number at the start of a library folder's name, or 0 for names without one.
+fn seed_number(name: &str) -> u32 {
+    name.split('-').next().and_then(|number| number.parse().ok()).unwrap_or(0)
+}
+
+/// The library's seeds, newest first, with the active one marked.
+pub fn list_seeds() -> Vec<ui_core::menu::SeedEntry> {
+    let active = active_seed();
+    let mut names: Vec<String> = fs::read_dir(SEED_LIBRARY)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(name) = active.as_ref().filter(|name| !name.is_empty()) {
+        names.push(name.clone());
+    }
+    names.sort_by_key(|name| (std::cmp::Reverse(seed_number(name)), name.clone()));
+    let mut seeds: Vec<_> = names
+        .into_iter()
+        .map(|name| {
+            let is_active = active.as_deref() == Some(name.as_str());
+            let folder = if is_active { active_folder() } else { format!("{SEED_LIBRARY}/{name}") };
+            let desc = fs::read_to_string(format!("{folder}/desc.txt")).unwrap_or_default();
+            let mut lines = desc.lines().map(str::trim).filter(|line| !line.is_empty());
+            let title = lines.next().unwrap_or(&name).to_owned();
+            let mut details: Vec<&str> = lines.filter(|line| *line != "ALBW Randomizer").collect();
+            let saved = format!("Kept in /3ds/albw-rando/seeds/{name} when not active.");
+            details.push(&saved);
+            ui_core::menu::SeedEntry { title, details: details.join("   "), active: is_active, name }
+        })
+        .collect();
+    if active.as_deref() == Some("") {
+        seeds.insert(
+            0,
+            ui_core::menu::SeedEntry {
+                name: String::new(),
+                title: "Another Mod".to_owned(),
+                details: format!(
+                    "A mod this app didn't make is in /luma/titles/{TITLE_ID:016X}. Choosing a seed moves it to /3ds/albw-rando/seeds, so you can switch back to it here."
+                ),
+                active: true,
+            },
+        );
+    }
+    seeds
+}
+
+/// Makes the library seed `name` the one the game plays, or none for an unrandomized game. The
+/// seed or mod there now goes to the library first. Returns what to tell the player.
+pub fn use_seed(name: Option<&str>) -> Result<String, String> {
+    if name.is_some_and(|name| !is_seed_name(name)) {
+        return Err("That seed's folder name can't be used.".to_owned());
+    }
+    let active = active_folder();
+    let current = active_seed();
+    if current.is_some() && current.as_deref() == name {
+        return Ok("That seed is already active.".to_owned());
+    }
+    if modmoon_installed() {
+        if let Some(slot) = modmoon_active_slot() {
+            return Err(format!(
+                "ModMoon has its Slot {slot} active for A Link Between Worlds and would move it back when it opens. In ModMoon, turn off the mod for this game first, then try again."
+            ));
+        }
+    }
+    if let Some(current) = current {
+        let back = if current.is_empty() {
+            let number = (1u32..).find(|n| !Path::new(&format!("{SEED_LIBRARY}/other-mod-{n}")).exists()).expect("a free name exists");
+            format!("other-mod-{number}")
+        } else {
+            current
+        };
+        let target = format!("{SEED_LIBRARY}/{back}");
+        if Path::new(&target).exists() {
+            return Err(format!("Could not put the active seed back: /3ds/albw-rando/seeds/{back} already exists."));
+        }
+        fs::create_dir_all(SEED_LIBRARY).map_err(|err| format!("Could not create the seeds folder: {err}"))?;
+        fs::rename(&active, &target).map_err(|err| format!("Could not move the active seed to /3ds/albw-rando/seeds/{back}: {err}"))?;
+        let _ = fs::remove_file(format!("{target}/{ACTIVE_NOTE}"));
+        log(&format!("Moved the active seed to {target}"));
+    }
+    let Some(name) = name else {
+        return Ok("The game starts unrandomized now. Your seeds are still here.".to_owned());
+    };
+    let source = format!("{SEED_LIBRARY}/{name}");
+    fs::create_dir_all(LUMA_TITLES).map_err(|err| format!("Could not create /luma/titles: {err}"))?;
+    fs::rename(&source, &active).map_err(|err| format!("Could not move the seed to /luma/titles: {err}. The game starts unrandomized for now."))?;
+    // Without the note, the seed would come back as someone else's mod.
+    if let Err(err) = fs::write(format!("{active}/{ACTIVE_NOTE}"), name) {
+        let _ = fs::rename(&active, &source);
+        return Err(format!("Could not mark the seed as active: {err}. The game starts unrandomized for now."));
+    }
+    log(&format!("Activated seed {name}"));
+    Ok("Start the game to play it. Every seed shares the game's save files, so start a new file for a new seed.".to_owned())
+}
+
 /// Moves the finished patch to where the player will use it. Never touches an occupied slot.
-/// Returns the path to show.
-fn save(seed: u32, hash: &str, preset: &str, mods: &[String]) -> Result<String, String> {
+/// Without ModMoon, the new seed also becomes the active one. Returns the lines to show.
+fn save(seed: u32, hash: &str, preset: &str, mods: &[String]) -> Result<Vec<String>, String> {
     let id = format!("{TITLE_ID:016X}");
     let source = format!("{BUILD_DIR}/{id}");
-    let (parent, name) = if Path::new(MODMOON_ROOT).is_dir() {
+    let modmoon = uses_modmoon();
+    let (parent, name) = if modmoon {
         modmoon_slot(&id)
     } else {
-        let number = (0u32..).find(|n| !Path::new(&format!("{SEED_LIBRARY}/seed-{seed}-{n}")).exists()).expect("a free name exists");
-        (SEED_LIBRARY.to_owned(), format!("seed-{seed}-{number}"))
+        let active = active_seed().map_or(0, |name| seed_number(&name));
+        let library = fs::read_dir(SEED_LIBRARY)
+            .map(|entries| entries.flatten().filter_map(|entry| Some(seed_number(entry.file_name().to_str()?))).max().unwrap_or(0))
+            .unwrap_or(0);
+        (SEED_LIBRARY.to_owned(), format!("{:04}-seed-{seed}", active.max(library) + 1))
     };
     let target = format!("{parent}/{name}");
     fs::create_dir_all(&parent).map_err(|err| format!("Could not create {parent}: {err}"))?;
     fs::rename(&source, &target).map_err(|err| format!("Could not move the patch to {target}: {err}"))?;
     let _ = fs::write(format!("{target}/desc.txt"), ui_core::modmoon::slot_description(seed, preset, hash, mods));
     let _ = fs::remove_dir_all(BUILD_DIR);
-    Ok(target.trim_start_matches("sdmc:").to_owned())
+    let saved = target.trim_start_matches("sdmc:").to_owned();
+    if modmoon {
+        return Ok(vec![format!("Saved to {saved}"), "Pick it in ModMoon to play it.".to_owned()]);
+    }
+    // The seed is already saved, so a switch that fails is only reported.
+    Ok(match use_seed(Some(&name)) {
+        Ok(_) => vec!["Active now. Start the game to play it.".to_owned(), "Switch seeds under Your Seeds.".to_owned()],
+        Err(err) => {
+            log(&err);
+            vec![format!("Saved to {saved}"), "It could not be made active. Try again under Your Seeds.".to_owned()]
+        }
+    })
 }
 
 fn random_seed() -> u32 {
@@ -620,9 +796,9 @@ fn run(request: Request) -> Result<(), String> {
     }
     let mods: Vec<String> = selected.iter().rev().map(|(line, _, _)| line.clone()).collect();
 
-    let path = save(seed, &hash, &preset_name, &mods)?;
-    log(&format!("Saved to {path}, hash {hash}"));
-    let mut lines = vec![format!("Saved to {path}"), format!("Seed {seed}   Hash {hash}")];
+    let mut lines = save(seed, &hash, &preset_name, &mods)?;
+    log(&format!("Saved: {}, hash {hash}", lines.join(" ")));
+    lines.push(format!("Seed {seed}   Hash {hash}"));
     // The seed is already saved, so a log that cannot be written is only reported.
     match save_spoiler(&seed_info) {
         Ok(spoiler) => log(&format!("Spoiler log saved to {spoiler}")),

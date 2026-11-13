@@ -38,6 +38,13 @@ pick a new random one, then choose Start Randomizing. The app installs the seed 
 patch, so the next time you start the game it is randomized. Spoiler logs are saved in
 `/3ds/albw-rando/spoilers/` and can be read in the app under Spoiler Logs.
 
+Seeds are kept in `/3ds/albw-rando/seeds/`. The active one is moved to
+`/luma/titles/00040000000EC300/`. Under Your Seeds, pick another seed or play unrandomized. A
+mod that was already in that Luma folder moves to the seeds folder, so you can switch back to it.
+If ModMoon is installed, the app asks once whether ModMoon or the app should switch seeds, and
+App Settings can change that later. With ModMoon, each seed goes into a new ModMoon slot.
+All seeds share the game's save files, so start a new file for a new seed.
+
 ## Archipelago
 
 The app uses its own apworld, "A Link Between Worlds - 3DS", based on randomsalience's

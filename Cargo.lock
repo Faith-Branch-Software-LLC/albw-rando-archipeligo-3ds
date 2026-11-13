@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "app-3ds"
-version = "0.2.13"
+version = "0.2.15"
 dependencies = [
  "ap-patch",
  "block-pool",
