@@ -82,13 +82,12 @@ fn run(command: &mut Command) {
 }
 
 /// Packs a plugin's memory image as a `.3gx` file, following Luma3DS's `3gx.h`.
-fn pack_3gx(code: &[u8], bss: u32) -> Vec<u8> {
+fn pack_3gx(code: &[u8], bss: u32, title: &[u8], flags: u32) -> Vec<u8> {
     let words = |data: &[u32]| data.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<u8>>();
     let mut code = code.to_vec();
     code.resize(code.len().next_multiple_of(4), 0);
     let checksum = code.chunks_exact(4).fold(0u32, |sum, word| sum.wrapping_add(u32::from_le_bytes(word.try_into().unwrap())));
     let author = b"Faith Branch Software\0";
-    let title = b"ALBW Randomizer game files\0";
     let targets = PLUGIN_TARGET.to_le_bytes();
     let load_func = words(&PLUGIN_LOAD_FUNC);
 
@@ -107,9 +106,6 @@ fn pack_3gx(code: &[u8], bss: u32) -> Vec<u8> {
     let code_at = place(&code, 16);
     let code_len = code.len() as u32;
 
-    // Flags: embedded exe load function, works on console and emulator, events self managed (the
-    // plugin never hands control back to the game), swap not needed.
-    let flags = 1 | (2 << 4) | (1 << 6) | (1 << 7);
     let mut header = Vec::with_capacity(HEADER_LEN);
     header.extend_from_slice(&0x3230_3030_2458_4733u64.to_le_bytes()); // "3GX$0002"
     header.extend(words(&[1, 0])); // plugin version, reserved
@@ -123,18 +119,53 @@ fn pack_3gx(code: &[u8], bss: u32) -> Vec<u8> {
     file
 }
 
-/// Builds the plugin and returns the path of the `.3gx` file.
-fn build_plugin(out: &Path) -> PathBuf {
-    let source = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../plugin");
-    for file in ["main.c", "crt0.s", "plugin.ld"] {
+/// One of the app's plugins: its folder at the repository root, its C files, its name, title, and
+/// 3gx flags.
+struct Plugin {
+    folder: &'static str,
+    sources: &'static [&'static str],
+    name: &'static str,
+    title: &'static [u8],
+    flags: u32,
+}
+
+/// Flags: embedded exe load function, works on console and emulator, events self managed (the
+/// plugin never hands control back to the game), swap not needed.
+const FILES_PLUGIN: Plugin = Plugin {
+    folder: "plugin",
+    sources: &["main.c"],
+    name: "albw-files",
+    title: b"ALBW Randomizer game files\0",
+    flags: 1 | (2 << 4) | (1 << 6) | (1 << 7),
+};
+
+/// Flags: embedded exe load function, works on console and emulator, swap not needed (the plugin
+/// runs beside the game, so its memory must stay in place while the HOME Menu is open).
+const QOL_PLUGIN: Plugin = Plugin {
+    folder: "overlay",
+    sources: &["main.c", "map.c", "map_logic.c", "rpc.c"],
+    name: "albw-qol",
+    title: b"ALBW Randomizer QoL\0",
+    flags: 1 | (2 << 4) | (1 << 7),
+};
+
+/// Builds a plugin and returns the path of the `.3gx` file.
+fn build_plugin(out: &Path, plugin: &Plugin) -> PathBuf {
+    let source = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..").join(plugin.folder);
+    for file in plugin.sources.iter().chain(&["crt0.s", "plugin.ld"]) {
         println!("cargo:rerun-if-changed={}", source.join(file).display());
+    }
+    for header in ["overlay.h", "map_logic.h"] {
+        if source.join(header).exists() {
+            println!("cargo:rerun-if-changed={}", source.join(header).display());
+        }
     }
     println!("cargo:rerun-if-env-changed=ALBW_PLUGIN_CFLAGS");
     let devkitpro = PathBuf::from(env::var("DEVKITPRO").unwrap_or_else(|_| "/opt/devkitpro".to_owned()));
     let bin = env::var("DEVKITARM").map_or_else(|_| devkitpro.join("devkitARM"), PathBuf::from).join("bin");
     let ctru = devkitpro.join("libctru");
-    let elf = out.join("albw-files.elf");
-    let flat = out.join("albw-files.bin");
+    let elf = out.join(format!("{}.elf", plugin.name));
+    let flat = out.join(format!("{}.bin", plugin.name));
     let mut gcc = Command::new(bin.join("arm-none-eabi-gcc"));
     gcc.args(["-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard", "-mtp=soft", "-O2", "-Wall", "-Wno-format-truncation"])
         .args(["-ffunction-sections", "-fdata-sections", "-D__3DS__"])
@@ -143,7 +174,7 @@ fn build_plugin(out: &Path) -> PathBuf {
         .args(["-nostartfiles", "-specs=sync-dmb.specs", "-Wl,--gc-sections", "-T"])
         .arg(source.join("plugin.ld"))
         .arg(source.join("crt0.s"))
-        .arg(source.join("main.c"))
+        .args(plugin.sources.iter().map(|file| source.join(file)))
         .arg(format!("-L{}", ctru.join("lib").display()))
         .args(["-lctru", "-lm", "-o"])
         .arg(&elf);
@@ -160,9 +191,9 @@ fn build_plugin(out: &Path) -> PathBuf {
         .expect("the plugin has an __end__ symbol");
     let code = fs::read(&flat).unwrap();
     let bss = end.saturating_sub(PLUGIN_BASE + code.len().next_multiple_of(4) as u32);
-    let plugin = out.join("albw-files.3gx");
-    fs::write(&plugin, pack_3gx(&code, bss)).unwrap();
-    plugin
+    let path = out.join(format!("{}.3gx", plugin.name));
+    fs::write(&path, pack_3gx(&code, bss, plugin.title, plugin.flags)).unwrap();
+    path
 }
 
 fn main() {
@@ -194,6 +225,15 @@ fn main() {
     }
     fs::write(Path::new(&out).join("sounds.rs"), code).unwrap();
 
-    let plugin = build_plugin(Path::new(&out));
-    fs::write(Path::new(&out).join("plugin.rs"), format!("pub const PLUGIN: &[u8] = include_bytes!({:?});\n", plugin.display().to_string())).unwrap();
+    let files = build_plugin(Path::new(&out), &FILES_PLUGIN);
+    let qol = build_plugin(Path::new(&out), &QOL_PLUGIN);
+    fs::write(
+        Path::new(&out).join("plugin.rs"),
+        format!(
+            "pub const PLUGIN: &[u8] = include_bytes!({:?});\npub const QOL_PLUGIN: &[u8] = include_bytes!({:?});\n",
+            files.display().to_string(),
+            qol.display().to_string()
+        ),
+    )
+    .unwrap();
 }

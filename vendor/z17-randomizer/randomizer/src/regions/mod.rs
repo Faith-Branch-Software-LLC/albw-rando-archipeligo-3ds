@@ -97,6 +97,53 @@ pub mod lorule {
     pub mod skull;
 }
 
+/// A location as its region file lists it: subregion, the region's course, name, and patch.
+pub type RegionLocation = (&'static Subregion, ::game::Course, &'static str, &'static str);
+
+/// Every location in every region file.
+pub fn locations() -> Vec<RegionLocation> {
+    let lists: [fn() -> Vec<RegionLocation>; 30] = [
+        dungeons::dark::locations,
+        dungeons::desert::locations,
+        dungeons::eastern::locations,
+        dungeons::house::locations,
+        dungeons::hyrule::locations,
+        dungeons::ice::locations,
+        dungeons::lorule::locations,
+        dungeons::skull::locations,
+        dungeons::swamp::locations,
+        dungeons::thieves::locations,
+        dungeons::tower::locations,
+        dungeons::turtle::locations,
+        hyrule::death::locations,
+        hyrule::desert::locations,
+        hyrule::eastern::locations,
+        hyrule::field::locations,
+        hyrule::irene::locations,
+        hyrule::kakariko::locations,
+        hyrule::lake::locations,
+        hyrule::lost::locations,
+        hyrule::ravio::locations,
+        hyrule::river::locations,
+        hyrule::southern::locations,
+        lorule::dark::locations,
+        lorule::death::locations,
+        lorule::field::locations,
+        lorule::graveyard::locations,
+        lorule::lake::locations,
+        lorule::misery::locations,
+        lorule::skull::locations,
+    ];
+    lists.iter().flat_map(|list| list()).collect()
+}
+
+impl Subregion {
+    /// The region's short id within its file, such as "main".
+    pub fn id(&self) -> &'static str {
+        self.id
+    }
+}
+
 pub(crate) fn patch(patcher: &mut Patcher, seed_info: &SeedInfo) -> crate::Result<()> {
     info!("Patching Randomized Checks...");
 
@@ -161,6 +208,15 @@ macro_rules! region {
         $crate::subregion!($start $start_props);
         $($crate::subregion!($id $props);)*
 
+        /// Every location in this region, with its subregion and how it is patched.
+        #[allow(unused)]
+        pub fn locations() -> Vec<$crate::regions::RegionLocation> {
+            let mut all: Vec<$crate::regions::RegionLocation> = Vec::new();
+            all.extend($start::LOCATIONS.iter().map(|&(name, patch)| ($start::SUBREGION, COURSE, name, patch)));
+            $(all.extend($id::LOCATIONS.iter().map(|&(name, patch)| ($id::SUBREGION, COURSE, name, patch)));)*
+            all
+        }
+
         pub const NAME: &str = $name;
         pub const COLOR: $crate::hints::hint_color::HintColor = $crate::hints::hint_color::HintColor::$color;
         #[allow(unused)]
@@ -186,6 +242,10 @@ macro_rules! subregion {
             use $crate::{patch::Patcher, regions::Subregion};
 
             pub use super::COURSE;
+
+            /// Each location's name and its patch, as written in the region file.
+            #[allow(unused)]
+            pub const LOCATIONS: &[(&str, &str)] = &[$($(($key, stringify!($variant $props)),)*)?];
 
             pub const SUBREGION: &Subregion = &Subregion {
                 name: super::NAME,

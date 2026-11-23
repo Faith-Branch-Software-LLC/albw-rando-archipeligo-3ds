@@ -140,6 +140,74 @@ pub fn decompress(file: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Decompresses in pieces, handing the output to `sink` a little at a time, so the whole output
+/// never has to sit in one block of memory. Returns the output's length.
+pub fn decompress_with(file: &[u8], mut sink: impl FnMut(&[u8]) -> Result<()>) -> Result<usize> {
+    typedef! { struct Header: TryFromBytes<'_> [0x10] {
+        #b"Yaz0",
+        [4] decompressed_size: [u8; 4],
+        [8] padding: [u8; 8],
+    }}
+    let (header, data) = Header::try_from_slice(file)?;
+    let decompressed_size = u32::from_be_bytes(header.decompressed_size) as usize;
+
+    // Back-references reach at most this far.
+    const WINDOW: usize = 0x1000;
+    // Output is passed on once this much past the window has built up.
+    const FLUSH: usize = 0x8000;
+    // One back-reference copies at most 0x111 bytes.
+    let mut out: Vec<u8> = Vec::with_capacity(WINDOW + FLUSH + 0x120);
+    let mut passed = 0;
+    let mut position = 0;
+
+    'chunks: while let Some(chunk_header) = data.get(position) {
+        position += 1;
+        for i in 0..8 {
+            if position >= data.len() || passed + out.len() >= decompressed_size {
+                break 'chunks;
+            }
+
+            if chunk_header & (1 << (7 - i)) != 0 {
+                out.push(data[position]);
+                position += 1;
+            } else {
+                let byte0 = data[position];
+                let byte1 = data.get(position + 1).ok_or(Error::new("End of file reached"))?;
+
+                let mut size = (byte0 >> 4) as usize;
+                if size != 0 {
+                    size += 2;
+                    position += 2;
+                } else {
+                    let byte2 = data.get(position + 2).ok_or(Error::new("End of file reached"))?;
+                    size = *byte2 as usize + 18;
+                    position += 3;
+                }
+
+                let reverse = ((byte0 as usize & 0xf) << 8) + *byte1 as usize + 1;
+                if reverse > out.len() {
+                    return Err(Error::new("Invalid data in yaz0 file"));
+                }
+
+                let out_position = out.len() - reverse;
+                for i in 0..size {
+                    out.push(out[out_position + i]);
+                }
+            }
+
+            if out.len() >= WINDOW + FLUSH {
+                let done = out.len() - WINDOW;
+                sink(&out[..done])?;
+                out.drain(..done);
+                passed += done;
+            }
+        }
+    }
+
+    sink(&out)?;
+    Ok(passed + out.len())
+}
+
 pub fn compress(file: &[u8]) -> Vec<u8> {
     let size = file.len() as u32;
     // Output is usually about this size, and starting here avoids most regrowth in tight memory.

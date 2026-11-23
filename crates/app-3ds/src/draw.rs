@@ -334,3 +334,38 @@ pub fn triforce(center_x: f32, top: f32, side: f32, color: u32) {
         piece(center_x + side / 2.0, top + height);
     }
 }
+
+/// The app version and the memory the console gave the app, shown in the top screen's lower
+/// corners. A New 3DS sometimes starts the app with only Old 3DS memory, and seeds can then run
+/// out of memory, so the player can see it and restart the app from the HOME Menu.
+struct Corners {
+    version: String,
+    memory: String,
+    low: bool,
+}
+
+static CORNERS: std::sync::OnceLock<Corners> = std::sync::OnceLock::new();
+
+/// Sets the corner labels once at startup. `low` colors the memory label as a warning.
+pub fn set_corners(memory: String, low: bool) {
+    let _ = CORNERS.set(Corners { version: format!("v{}", env!("CARGO_PKG_VERSION")), memory, low });
+}
+
+/// Draws the corner labels on the top screen.
+pub fn corners() {
+    let Some(corners) = CORNERS.get() else { return };
+    const SCALE: f32 = 0.45;
+    let height = line_height(SCALE);
+    let y = 240.0 - height - 2.0;
+    // A dark plate behind each label keeps it readable on top of the art.
+    let plate = |content: &str, left: f32| {
+        let width = text_width(Font::Body, content, SCALE) + 8.0;
+        let left = if left < 200.0 { left } else { left - width };
+        rounded_rect(left, y - 1.0, width, height + 2.0, 4.0, rgba(0x0C, 0x12, 0x22, 200));
+        left + 4.0
+    };
+    let x = plate(&corners.version, 2.0);
+    text(&corners.version, x, y, SCALE, WHITE, LEFT);
+    let x = plate(&corners.memory, 398.0);
+    text(&corners.memory, x, y, SCALE, if corners.low { RED } else { WHITE }, LEFT);
+}

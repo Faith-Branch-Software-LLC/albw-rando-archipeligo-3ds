@@ -194,7 +194,13 @@ impl Screen {
 
         let this = &*self;
         let state = State { overall, eta, elapsed, finished, failure: failure.as_deref() };
-        draw::frame(|| this.draw_top(&state, triforce), || this.draw_bottom(finished, failure.is_some()));
+        draw::frame(
+            || {
+                this.draw_top(&state, triforce);
+                draw::corners();
+            },
+            || this.draw_bottom(finished, failure.is_some()),
+        );
     }
 
     fn status(state: &State) -> &'static str {

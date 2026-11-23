@@ -76,6 +76,11 @@ impl Pool {
         self.blocks[..self.count].iter().filter(|b| !b.used).map(|b| b.len).max().unwrap_or(0)
     }
 
+    /// Each block as (offset, length, in use), in address order, for finding what splits the pool.
+    pub fn blocks(&self) -> impl Iterator<Item = (usize, usize, bool)> + '_ {
+        self.blocks[..self.count].iter().map(|b| (b.offset, b.len, b.used))
+    }
+
     pub fn contains(&self, ptr: *mut u8) -> bool {
         let at = ptr as usize;
         self.size > 0 && at >= self.base && at < self.base + self.size

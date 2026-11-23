@@ -80,10 +80,61 @@ pub const OPTIONS: &[OptionDef] = &[
     option("treacherous_tower_floors", "Treacherous Floors", 4, Kind::Number { min: 2, max: 66, step: 1 }, "How many floors Treacherous Tower has."),
     option("hint_ghosts", "Hint Ghosts", 5, Kind::Choice(&[("Off", "Off"), ("Always", "Always"), ("Glasses", "With Glasses")]), "When Hint Ghosts can be seen."),
     option("chest_size_matches_contents", "Chest Size Hints", 5, Kind::Toggle, "Large chests hold progression or unique items, and small chests hold the rest."),
-    option("change_freestanding_models", "True Item Models", 5, Kind::Toggle, "WARNING: Crashes the game at launch for now. Leave this off. Loose items look like what they really are."),
+    option("change_freestanding_models", "True Item Models", 5, Kind::Toggle, "Loose Heart Pieces, Heart Containers, small keys and a rupee look like the item they hold. The game has room for only so many models, so in a few seeds some keep their usual look."),
     option("purple_potion_bottles", "Purple Potion Bottles", 5, Kind::Toggle, "Fills every empty Bottle with a free Purple Potion."),
     option("night_mode", "Night Mode", 5, Kind::Toggle, "Experimental. Hyrule uses night colors until you visit Lorule."),
 ];
+
+/// What each choice of a choice option does, by option key and stored value. A test checks that
+/// every choice has an entry.
+pub const CHOICE_HELP: &[(&str, &str, &str)] = &[
+    ("logic_mode", "Normal", "No tricks or glitches. Choose this if unsure."),
+    ("logic_mode", "Hard", "Adds tricks that are not glitches, and counts the Lamp and Net as weapons."),
+    ("logic_mode", "Glitched", "Adds easy glitches to Hard."),
+    ("logic_mode", "AdvGlitched", "Adds harder glitches that take practice."),
+    ("logic_mode", "Hell", "Expects every known glitch that can be done in real time."),
+    ("logic_mode", "NoLogic", "Items can be anywhere. The seed may be impossible to finish."),
+    ("ped_requirement", "Vanilla", "Needs only the Pendants of Power and Wisdom."),
+    ("ped_requirement", "Standard", "Needs all three Pendants."),
+    ("cracks", "Closed", "Cracks stay closed until you find Quake, except the Hyrule Castle crack."),
+    ("cracks", "Open", "Every crack is open from the start, and Quake is not in the seed."),
+    ("cracks", "Progressive", "The Bracelet and Quake become two Merge items. The first lets you merge, and the second opens the cracks."),
+    ("cracksanity", "Off", "Each crack leads where it normally does."),
+    ("cracksanity", "CrossWorldPairs", "Cracks are shuffled, but each still links Hyrule to Lorule."),
+    ("cracksanity", "AnyWorldPairs", "Cracks are shuffled freely, and can link two places in the same world."),
+    ("cracksanity", "MirroredCrossWorldPairs", "Like Cross World, and the cracks paired with them in the other world are paired the same way."),
+    ("cracksanity", "MirroredAnyWorldPairs", "Like Any World, and the cracks paired with them in the other world are paired the same way."),
+    ("weather_vanes", "Standard", "Only the Weather Vanes at Link's House and the Vacant House start active."),
+    ("weather_vanes", "Shuffled", "Weather Vanes are shuffled in pairs, so each one unlocks a random other one."),
+    ("weather_vanes", "Convenient", "Starts with the Weather Vanes that save travel without changing logic."),
+    ("weather_vanes", "Hyrule", "Starts with the 9 Hyrule Weather Vanes active."),
+    ("weather_vanes", "Lorule", "Starts with the 13 Lorule Weather Vanes active."),
+    ("weather_vanes", "All", "Starts with all 22 Weather Vanes active."),
+    ("trials_door", "OpenFromInsideOnly", "Opens on its own, but only from inside Lorule Castle."),
+    ("trials_door", "OneTrialRequired", "One random trial must be finished to open it."),
+    ("trials_door", "TwoTrialsRequired", "Two random trials must be finished to open it."),
+    ("trials_door", "ThreeTrialsRequired", "Three random trials must be finished to open it."),
+    ("trials_door", "AllTrialsRequired", "All four trials must be finished to open it."),
+    ("trials_door", "OpenFromBothSides", "Opens on its own from inside the castle or from Hilda's Study. The seed may expect you to enter the castle early."),
+    ("nice_items", "Vanilla", "Mother Maiamai upgrades your items, as in the normal game."),
+    ("nice_items", "Shuffled", "Two copies of each of Ravio's items are shuffled, and the second is the Nice version. Mother Maiamai's gifts are shuffled."),
+    ("nice_items", "Off", "Nice items are replaced with junk. Mother Maiamai's gifts are shuffled."),
+    ("nice_items", "Upgrades", "Upgrades are shuffled. Each one gives the Nice version only if you already have the item."),
+    ("super_items", "Shuffled", "A second Lamp and a second Net are shuffled, and each upgrades the first."),
+    ("super_items", "Off", "Only one Lamp and one Net are in the seed, with no Super versions."),
+    ("super_items", "Upgrades", "Upgrades are shuffled. Each one gives the Super version only if you already have the item."),
+    ("keysy", "Off", "Keys and locked doors are as in the normal game."),
+    ("keysy", "SmallKeysy", "Small Keys and their locked doors are removed from every dungeon."),
+    ("keysy", "BigKeysy", "Big Keys and their big doors are removed from every dungeon."),
+    ("keysy", "AllKeysy", "Every key and locked door is removed from every dungeon."),
+    ("hint_ghosts", "Off", "Hint Ghosts never appear."),
+    ("hint_ghosts", "Always", "Hint Ghosts can always be seen."),
+    ("hint_ghosts", "Glasses", "Hint Ghosts appear once you have the Hint Glasses."),
+];
+
+fn choice_help(key: &str, value: &str) -> Option<&'static str> {
+    CHOICE_HELP.iter().find(|(k, v, _)| *k == key && *v == value).map(|(_, _, help)| *help)
+}
 
 pub fn option_index(key: &str) -> Option<usize> {
     OPTIONS.iter().position(|option| option.key == key)
@@ -130,6 +181,17 @@ impl Rules {
             }
             Kind::Number { .. } => value.and_then(Value::as_i64).unwrap_or(0).to_string(),
         }
+    }
+
+    /// The option's description, plus what its current choice does.
+    pub fn help(&self, option: &OptionDef) -> String {
+        if let Kind::Choice(_) = option.kind {
+            let stored = self.values.get(option.key).and_then(Value::as_str).unwrap_or("");
+            if let Some(help) = choice_help(option.key, stored) {
+                return format!("{} {}: {}", option.help, self.value_text(option), help);
+            }
+        }
+        option.help.to_owned()
     }
 
     /// The option's choices and the one picked, for drawing as pills. Toggles are Off and On.
@@ -245,6 +307,21 @@ impl Rules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_choice_explains_itself() {
+        for option in OPTIONS {
+            if let Kind::Choice(choices) = option.kind {
+                for (value, _) in choices {
+                    assert!(choice_help(option.key, value).is_some(), "{} {value} has no help", option.key);
+                }
+            }
+        }
+        for (key, value, _) in CHOICE_HELP {
+            let option = &OPTIONS[option_index(key).expect("a real option")];
+            assert!(matches!(option.kind, Kind::Choice(choices) if choices.iter().any(|(v, _)| v == value)), "{key} {value} is not a choice");
+        }
+    }
 
     #[test]
     fn every_setting_has_a_menu_entry_or_is_listed_as_hidden() {

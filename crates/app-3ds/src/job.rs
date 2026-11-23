@@ -56,9 +56,14 @@ const MOUNT: &str = "albw";
 const OLD_3DS_BUDGET_MB: usize = 18;
 /// A New 3DS has room to spare at this budget, which keeps its small-object heap well clear of full.
 const NEW_3DS_BUDGET_MB: usize = 40;
+/// The largest free block the patcher keeps. The biggest scene archive needs about 6.5 MB in one
+/// piece once decompressed, beside its compressed copy.
+const PATCH_HEADROOM_MB: usize = 9;
 
 pub struct Request {
     pub seed: u32,
+    /// The seed's name, or empty for "Seed <number>".
+    pub seed_title: String,
     /// A number the player typed is kept. Otherwise a seed that cannot work is replaced.
     pub seed_was_typed: bool,
     pub settings: Settings,
@@ -489,6 +494,11 @@ fn modmoon_slot(id: &str) -> (String, String) {
     (parent, format!("Slot_{slot}"))
 }
 
+/// Where the game is to start it: installed on the SD card, or else the game card.
+pub fn game_media() -> Option<ctru_sys::FS_MediaType> {
+    [ctru_sys::MEDIATYPE_SD, ctru_sys::MEDIATYPE_GAME_CARD].into_iter().find(|&media| title_present(media).unwrap_or(false))
+}
+
 /// True when ModMoon is installed.
 pub fn modmoon_installed() -> bool {
     Path::new(MODMOON_ROOT).is_dir()
@@ -645,7 +655,7 @@ pub fn use_seed(name: Option<&str>) -> Result<String, String> {
 
 /// Moves the finished patch to where the player will use it. Never touches an occupied slot.
 /// Without ModMoon, the new seed also becomes the active one. Returns the lines to show.
-fn save(seed: u32, hash: &str, preset: &str, mods: &[String]) -> Result<Vec<String>, String> {
+fn save(seed: u32, title: &str, hash: &str, preset: &str, mods: &[String]) -> Result<Vec<String>, String> {
     let id = format!("{TITLE_ID:016X}");
     let source = format!("{BUILD_DIR}/{id}");
     let modmoon = uses_modmoon();
@@ -661,7 +671,7 @@ fn save(seed: u32, hash: &str, preset: &str, mods: &[String]) -> Result<Vec<Stri
     let target = format!("{parent}/{name}");
     fs::create_dir_all(&parent).map_err(|err| format!("Could not create {parent}: {err}"))?;
     fs::rename(&source, &target).map_err(|err| format!("Could not move the patch to {target}: {err}"))?;
-    let _ = fs::write(format!("{target}/desc.txt"), ui_core::modmoon::slot_description(seed, preset, hash, mods));
+    let _ = fs::write(format!("{target}/desc.txt"), ui_core::modmoon::slot_description(seed, title, preset, hash, mods));
     let _ = fs::remove_dir_all(BUILD_DIR);
     let saved = target.trim_start_matches("sdmc:").to_owned();
     if modmoon {
@@ -684,7 +694,7 @@ fn random_seed() -> u32 {
 }
 
 fn run(request: Request) -> Result<(), String> {
-    let Request { mut seed, seed_was_typed, settings, mut preset_name, new_memory, model, voice, archipelago } = request;
+    let Request { mut seed, seed_title, seed_was_typed, settings, mut preset_name, new_memory, model, voice, archipelago } = request;
     log(&format!("App version {}", env!("CARGO_PKG_VERSION")));
     // SAFETY: libctru sets this once during startup, before main.
     let heap_mb = unsafe { crate::__ctru_heap_size } as f32 / (1024.0 * 1024.0);
@@ -762,6 +772,8 @@ fn run(request: Request) -> Result<(), String> {
         limit: budget * 1024 * 1024,
         usage: memory::usage,
         clear_before_compress: true,
+        largest_free: Some(memory::largest_free),
+        headroom: PATCH_HEADROOM_MB * 1024 * 1024,
     });
     progress::report("Patching regions", 0, 0);
     // A voice pack goes first, so it beats any sound file inside a model mod.
@@ -777,6 +789,7 @@ fn run(request: Request) -> Result<(), String> {
         })
         .collect();
     let result = load_game(source).and_then(|mut game| {
+        save_map_pictures(&game);
         if !selected.is_empty() {
             game.overlay(selected.iter().map(|(_, _, folder)| folder.clone()).collect());
         }
@@ -796,7 +809,19 @@ fn run(request: Request) -> Result<(), String> {
     }
     let mods: Vec<String> = selected.iter().rev().map(|(line, _, _)| line.clone()).collect();
 
-    let mut lines = save(seed, &hash, &preset_name, &mods)?;
+    // The QoL plugin's logic map reads this file from the seed's folder. Archipelago seeds get none,
+    // as the multiworld's logic is not on the console; the plugin connects them to the client.
+    if !seed_info.is_archipelago() {
+        let started = now_ms();
+        let map = randomizer::tracker::map_data(&seed_info);
+        let path = Path::new(BUILD_DIR).join(format!("{TITLE_ID:016X}")).join(randomizer::tracker::MAP_FILE);
+        match fs::write(&path, &map) {
+            Ok(()) => log(&format!("Logic map: {} bytes in {} ms", map.len(), now_ms() - started)),
+            Err(err) => log(&format!("Logic map not saved: {err}")),
+        }
+    }
+
+    let mut lines = save(seed, &seed_title, &hash, &preset_name, &mods)?;
     log(&format!("Saved: {}, hash {hash}", lines.join(" ")));
     lines.push(format!("Seed {seed}   Hash {hash}"));
     // The seed is already saved, so a log that cannot be written is only reported.
@@ -875,10 +900,156 @@ unsafe fn request(session: ctru_sys::Handle, words: &[u32]) -> (i32, [u32; 8]) {
 /// system to start the game when the app closes. The plugin copies the files to `GAME_COPY` and
 /// comes back to the app. Returns what happened, for the log.
 pub fn start_copy(media: ctru_sys::FS_MediaType) -> Result<Vec<String>, String> {
+    // SAFETY: Reads a value libctru sets at startup.
+    let return_to = if unsafe { ctru_sys::envIsHomebrew() } { 0 } else { APP_TITLE_ID };
+    let config = [PLUGIN_REQUEST_MAGIC, PLUGIN_REQUEST_VERSION, return_to as u32, (return_to >> 32) as u32, u32::from(ctru_sys::MEDIATYPE_SD)];
+    let mut details = set_plugin(PLUGIN_FILE, PLUGIN, &config)?;
+    details.push(format!("Plugin set for the next launch, coming back to {return_to:016X}."));
+    // Start the game without an active seed or mod, so the plugin saves the original header.
+    let name = CString::new("Loader").expect("no zero byte");
+    let mut loader: ctru_sys::Handle = 0;
+    // SAFETY: The name outlives the call, and the session is closed below.
+    let result = unsafe { ctru_sys::srvGetServiceHandle(&mut loader, name.as_ptr()) };
+    if result >= 0 {
+        // SAFETY: The request carries no buffers. The session is open.
+        let (result, _) = unsafe { request(loader, &[0x0100_0000]) };
+        // SAFETY: The session is open.
+        let _ = unsafe { ctru_sys::svcCloseHandle(loader) };
+        details.push(format!("Turned off game patching for one launch: 0x{:08X}", result as u32));
+    } else {
+        details.push(format!("No Luma loader service: 0x{:08X}", result as u32));
+    }
+    // SAFETY: Takes effect when the app closes.
+    unsafe { ctru_sys::aptSetChainloader(TITLE_ID, media as u8) };
+    Ok(details)
+}
+
+/// The QoL plugin's pictures of Hyrule and Lorule, made from the game's own map.
+/// The large ones are for the zoomed-in view.
+const MAP_PICTURES: [(&str, &str, usize, bool); 4] = [
+    ("World/Layout/MapTexture/Lyt_FieldLight.bch", "sdmc:/3ds/albw-rando/qol/map-hyrule.bin", 232, false),
+    ("World/Layout/MapTexture/Lyt_FieldDark.bch", "sdmc:/3ds/albw-rando/qol/map-lorule.bin", 232, false),
+    ("World/Layout/MapTexture/Lyt_FieldLight.bch", "sdmc:/3ds/albw-rando/qol/map-hyrule-large.bin", 464, true),
+    ("World/Layout/MapTexture/Lyt_FieldDark.bch", "sdmc:/3ds/albw-rando/qol/map-lorule-large.bin", 464, true),
+];
+
+/// Makes the logic map's pictures from the player's game files, once. They stay on the SD card
+/// and are never shared. Without them, the map draws plain ground.
+fn save_map_pictures(game: &rom::Rom) {
+    for (source, target, size, large) in MAP_PICTURES {
+        if Path::new(target).exists() {
+            continue;
+        }
+        let picture = game
+            .read_range(source, 0, 4 << 20)
+            .map_err(|err| err.to_string())
+            .and_then(|data| ui_core::texture::map_picture(data, size, large));
+        match picture {
+            Ok(picture) => {
+                let bytes: Vec<u8> = picture.iter().flat_map(|pixel| pixel.to_le_bytes()).collect();
+                let _ = fs::create_dir_all("sdmc:/3ds/albw-rando/qol");
+                if let Err(err) = fs::write(target, bytes) {
+                    log(&format!("Map picture not saved: {err}"));
+                }
+            }
+            Err(err) => log(&format!("Map picture from {source}: {err}")),
+        }
+    }
+}
+
+/// Where the app saves the QoL plugin for Luma to load.
+const QOL_PLUGIN_FILE: &str = "/3ds/albw-rando/albw-qol.3gx";
+/// The QoL plugin's request version (see overlay/main.c).
+const QOL_REQUEST_VERSION: u32 = 2;
+
+/// Sets up Luma to load the QoL plugin with these choices the next time the game starts, then
+/// asks the system to start the game, with its active seed, when the app closes. `qol` holds the
+/// timer (0 off, 1 on), then ZL's and ZR's action.
+pub fn start_qol(media: ctru_sys::FS_MediaType, qol: [usize; 4]) -> Result<Vec<String>, String> {
+    let config = [PLUGIN_REQUEST_MAGIC, QOL_REQUEST_VERSION, qol[0] as u32, qol[1] as u32, qol[2] as u32];
+    let details = set_plugin(QOL_PLUGIN_FILE, QOL_PLUGIN, &config)?;
+    // SAFETY: Takes effect when the app closes.
+    unsafe { ctru_sys::aptSetChainloader(TITLE_ID, media as u8) };
+    Ok(details)
+}
+
+/// Where Luma looks for a plugin to load with every launch of the game.
+const LUMA_PLUGIN: &str = "sdmc:/luma/plugins/00040000000EC300/plugin.3gx";
+/// Where another plugin in `LUMA_PLUGIN` is kept while this app's plugin is there.
+const OTHER_PLUGIN: &str = "sdmc:/3ds/albw-rando/other-plugin.3gx";
+
+/// True when `data` is this app's QoL plugin, of any version.
+fn is_qol_plugin(data: &[u8]) -> bool {
+    data.windows(19).any(|window| window == b"ALBW Randomizer QoL")
+}
+
+/// Puts the QoL plugin in Luma's folder for the game, so Luma loads it whenever the game starts,
+/// or takes it out again. Another plugin found there is kept aside and put back afterwards.
+pub fn set_always_load(on: bool) -> Result<Vec<String>, String> {
+    let mut details = Vec::new();
+    let current = fs::read(LUMA_PLUGIN).ok();
+    if on {
+        if let Some(other) = current.as_ref().filter(|data| !is_qol_plugin(data)) {
+            if Path::new(OTHER_PLUGIN).exists() {
+                return Err(format!("Another plugin is in Luma's folder for the game, and {OTHER_PLUGIN} already holds one, so neither was moved. Move one of them away first."));
+            }
+            fs::create_dir_all(APP_DIR).map_err(|err| format!("Could not make the app's folder: {err}"))?;
+            fs::write(OTHER_PLUGIN, other).map_err(|err| format!("Could not keep the other plugin aside: {err}"))?;
+            details.push(format!("The plugin that was there is kept in {OTHER_PLUGIN}."));
+        }
+        if current.as_deref() != Some(QOL_PLUGIN) {
+            fs::create_dir_all("sdmc:/luma/plugins/00040000000EC300").map_err(|err| format!("Could not make Luma's plugin folder: {err}"))?;
+            fs::write(LUMA_PLUGIN, QOL_PLUGIN).map_err(|err| format!("Could not save the plugin in Luma's folder: {err}"))?;
+        }
+        details.insert(0, "The plugin now loads whenever the game starts. Keep Luma's plugin loader on in the Rosalina menu (L+Down+SELECT).".to_owned());
+        if let Ok(extra) = turn_on_plugin_loader() {
+            details.extend(extra);
+        }
+    } else {
+        if current.as_deref().is_some_and(is_qol_plugin) {
+            fs::remove_file(LUMA_PLUGIN).map_err(|err| format!("Could not remove the plugin from Luma's folder: {err}"))?;
+        }
+        details.push("The plugin loads only when the game is started from this page.".to_owned());
+        if Path::new(OTHER_PLUGIN).exists() && !Path::new(LUMA_PLUGIN).exists() {
+            fs::rename(OTHER_PLUGIN, LUMA_PLUGIN).map_err(|err| format!("Could not put the other plugin back: {err}"))?;
+            details.push("The plugin that was there before is back.".to_owned());
+        }
+    }
+    Ok(details)
+}
+
+/// Turns on Luma's plugin loader if it is off.
+fn turn_on_plugin_loader() -> Result<Vec<String>, String> {
+    use ctru_sys as sys;
+    let port = CString::new("plg:ldr").expect("no zero byte");
+    let mut session: sys::Handle = 0;
+    // SAFETY: The name outlives the call. The session is closed below.
+    let result = unsafe { sys::svcConnectToPort(&mut session, port.as_ptr()) };
+    if result < 0 {
+        return Err(format!("Luma's plugin loader isn't running (0x{:08X}). Update Luma3DS to version 13 or newer.", result as u32));
+    }
+    let mut details = Vec::new();
+    // SAFETY: These requests carry no buffers.
+    let (result, reply) = unsafe { request(session, &[0x0002_0000]) };
+    if result >= 0 && reply[2] == 0 {
+        // SAFETY: As above.
+        let (result, _) = unsafe { request(session, &[0x0003_0040, 1]) };
+        if result >= 0 {
+            details.push("Turned on Luma's plugin loader.".to_owned());
+        }
+    }
+    // SAFETY: The session is open.
+    let _ = unsafe { sys::svcCloseHandle(session) };
+    Ok(details)
+}
+
+/// Saves `plugin` to `file` on the SD card and tells Luma's plugin loader to load it, with
+/// `config` in its header, the next time the game starts, that one time only.
+fn set_plugin(file: &str, plugin: &[u8], config_words: &[u32]) -> Result<Vec<String>, String> {
     use ctru_sys as sys;
     let mut details = Vec::new();
     fs::create_dir_all(APP_DIR).map_err(|err| format!("Could not make the app's folder: {err}"))?;
-    fs::write(format!("sdmc:{PLUGIN_FILE}"), PLUGIN).map_err(|err| format!("Could not save the plugin to the SD card: {err}"))?;
+    fs::write(format!("sdmc:{file}"), plugin).map_err(|err| format!("Could not save the plugin to the SD card: {err}"))?;
 
     let port = CString::new("plg:ldr").expect("no zero byte");
     let mut session: sys::Handle = 0;
@@ -902,11 +1073,9 @@ pub fn start_copy(media: ctru_sys::FS_MediaType) -> Result<Vec<String>, String> 
             details.push("Turned on Luma's plugin loader.".to_owned());
         }
         let mut path = [0u8; 256];
-        path[..PLUGIN_FILE.len()].copy_from_slice(PLUGIN_FILE.as_bytes());
-        // SAFETY: Reads a value libctru sets at startup.
-        let return_to = if unsafe { sys::envIsHomebrew() } { 0 } else { APP_TITLE_ID };
+        path[..file.len()].copy_from_slice(file.as_bytes());
         let mut config = [0u32; 32];
-        config[..5].copy_from_slice(&[PLUGIN_REQUEST_MAGIC, PLUGIN_REQUEST_VERSION, return_to as u32, (return_to >> 32) as u32, u32::from(sys::MEDIATYPE_SD)]);
+        config[..config_words.len()].copy_from_slice(config_words);
         // No flash, no memory swapping, not kept after one launch, only for this game.
         let words = [0x0004_0084, 1 | (2 << 8), TITLE_ID as u32, (256 << 4) | 0xA, path.as_ptr() as u32, (128 << 4) | 0xA, config.as_ptr() as u32];
         // SAFETY: `path` and `config` outlive the request.
@@ -914,28 +1083,10 @@ pub fn start_copy(media: ctru_sys::FS_MediaType) -> Result<Vec<String>, String> 
         if result < 0 {
             return Err(format!("Could not tell Luma to load the plugin (0x{:08X}).", result as u32));
         }
-        details.push(format!("Plugin set for the next launch, coming back to {return_to:016X}."));
         Ok(())
     })();
     // SAFETY: The session is open.
     let _ = unsafe { sys::svcCloseHandle(session) };
     outcome?;
-
-    // Start the game without an active seed or mod, so the plugin saves the original header.
-    let name = CString::new("Loader").expect("no zero byte");
-    let mut loader: sys::Handle = 0;
-    // SAFETY: The name outlives the call, and the session is closed below.
-    let result = unsafe { sys::srvGetServiceHandle(&mut loader, name.as_ptr()) };
-    if result >= 0 {
-        // SAFETY: The request carries no buffers. The session is open.
-        let (result, _) = unsafe { request(loader, &[0x0100_0000]) };
-        // SAFETY: The session is open.
-        let _ = unsafe { sys::svcCloseHandle(loader) };
-        details.push(format!("Turned off game patching for one launch: 0x{:08X}", result as u32));
-    } else {
-        details.push(format!("No Luma loader service: 0x{:08X}", result as u32));
-    }
-    // SAFETY: Takes effect when the app closes.
-    unsafe { sys::aptSetChainloader(TITLE_ID, media as u8) };
     Ok(details)
 }

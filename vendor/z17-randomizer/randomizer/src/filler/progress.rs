@@ -16,11 +16,31 @@ use modinfo::settings::{pedestal::PedestalSetting, Settings};
 pub struct Progress<'s> {
     items: DashSet<Randomizable>,
     seed_info: &'s SeedInfo,
+    /// When set, every question about items goes to the tracer instead, to record the logic.
+    tracer: Option<std::sync::Arc<crate::tracker::trace::Tracer>>,
+    /// When set, rules use this logic instead of the seed's, for the logic map's glitched view.
+    logic_mode: Option<modinfo::settings::logic::LogicMode>,
 }
 
 impl<'s> Progress<'s> {
     pub fn new(seed_info: &'s SeedInfo) -> Progress<'s> {
-        Self { items: Default::default(), seed_info }
+        Self { items: Default::default(), seed_info, tracer: None, logic_mode: None }
+    }
+
+    /// The logic rules use: the seed's, unless [`Progress::with_logic_mode`] set another.
+    pub fn logic_mode(&self) -> modinfo::settings::logic::LogicMode {
+        self.logic_mode.unwrap_or(self.seed_info.settings.logic_mode)
+    }
+
+    /// The same progress, judged by another logic.
+    pub fn with_logic_mode(mut self, mode: modinfo::settings::logic::LogicMode) -> Self {
+        self.logic_mode = Some(mode);
+        self
+    }
+
+    /// A [`Progress`] whose answers come from `tracer`, to record logic rules.
+    pub fn traced(seed_info: &'s SeedInfo, tracer: std::sync::Arc<crate::tracker::trace::Tracer>) -> Progress<'s> {
+        Self { items: Default::default(), seed_info, tracer: Some(tracer), logic_mode: None }
     }
 
     /// Constructs a new [`Progress`] instance that already has all minor progression items.
@@ -31,7 +51,7 @@ impl<'s> Progress<'s> {
         items.extend(item_pools::get_gold_rupee_pool().iter().map(|&i| i.into()).collect::<DashSet<Randomizable>>());
         items.extend(item_pools::get_silver_rupee_pool().iter().map(|&i| i.into()).collect::<DashSet<Randomizable>>());
         items.extend(item_pools::get_purple_rupee_pool().iter().map(|&i| i.into()).collect::<DashSet<Randomizable>>());
-        Self { items, seed_info }
+        Self { items, seed_info, tracer: None, logic_mode: None }
     }
 
     pub fn get_items(&self) -> &DashSet<Randomizable> {
@@ -59,15 +79,19 @@ impl<'s> Progress<'s> {
     }
 
     pub fn has(&self, item: impl Into<Randomizable>) -> bool {
-        self.items.contains(&item.into())
+        let item = item.into();
+        if let Some(tracer) = &self.tracer {
+            return tracer.ask(crate::tracker::trace::Var::Has(item));
+        }
+        self.items.contains(&item)
     }
 
     fn has_either(&self, item1: impl Into<Randomizable>, item2: impl Into<Randomizable>) -> bool {
-        self.items.contains(&item1.into()) || self.items.contains(&item2.into())
+        self.has(item1) || self.has(item2)
     }
 
     fn has_both(&self, item1: impl Into<Randomizable>, item2: impl Into<Randomizable>) -> bool {
-        self.items.contains(&item1.into()) && self.items.contains(&item2.into())
+        self.has(item1) && self.has(item2)
     }
 
     fn has_any<T>(&self, items: impl IntoIterator<Item = T>) -> bool
@@ -86,6 +110,10 @@ impl<'s> Progress<'s> {
     where
         T: Into<Randomizable>,
     {
+        if let Some(tracer) = &self.tracer {
+            let items = items.into_iter().map(Into::into).collect();
+            return tracer.ask(crate::tracker::trace::Var::AtLeast(items, amount));
+        }
         self.count(items) >= amount
     }
 
@@ -108,6 +136,9 @@ impl<'s> Progress<'s> {
         if self.seed_info.is_archipelago() {
             return true;
         }
+        if let Some(tracer) = &self.tracer {
+            return tracer.ask(crate::tracker::trace::Var::Hearts((amount * 4.0).ceil() as u16));
+        }
 
         let heart_containers = self.count(item_pools::get_heart_containers()) as f32;
         let heart_pieces = self.count(item_pools::get_heart_pieces()) as f32;
@@ -118,6 +149,9 @@ impl<'s> Progress<'s> {
         // Rupees are not progression items in Archipelago, so instead require Treacherous Tower for easy farming
         if self.seed_info.is_archipelago() {
             return self.has(Goal::ClearTreacherousTower);
+        }
+        if let Some(tracer) = &self.tracer {
+            return tracer.ask(crate::tracker::trace::Var::Rupees(amount));
         }
 
         let purples = self.count(item_pools::get_purple_rupee_pool());

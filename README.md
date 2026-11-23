@@ -45,6 +45,35 @@ If ModMoon is installed, the app asks once whether ModMoon or the app should swi
 App Settings can change that later. With ModMoon, each seed goes into a new ModMoon slot.
 All seeds share the game's save files, so start a new file for a new seed.
 
+Give a seed a name under Seed Name, and Your Seeds and ModMoon show that name.
+
+## Speed and QoL
+
+The Speed and QoL page sets up a plugin that runs beside the game. Start the game from that page
+to use it, or turn on **Load Every Time** so Luma loads it whenever the game starts, from the HOME
+Menu or ModMoon too (Luma's plugin loader must stay on, in the Rosalina menu). With Load Every
+Time on, the plugin does nothing in games that are not this app's seeds or Archipelago patches. A
+plugin already in Luma's folder for the game is kept in `/3ds/albw-rando/other-plugin.3gx` and put
+back when Load Every Time is turned off. In Archipelago games the plugin also connects the game to
+the Archipelago client (see below).
+
+- **Speedrun Timer** shows in the top left corner while a save is being played. Time stops
+  whenever the game stops showing new frames, so loading screens are left out.
+- **ZL Button** and **ZR Button** can open the logic map or pause and start the timer. On an Old
+  3DS, hold SELECT and press L for ZL or R for ZR.
+  Holding the timer button for two seconds resets it.
+- **Logic Map** draws over the bottom screen, on the game's own map: green checks are in logic,
+  yellow ones need glitches beyond the seed's logic, red ones need more items, grey ones are
+  done. Tap a marker to list its checks by name; tap anywhere else to hide the list. Zoom In
+  shows a quarter of the world, and while zoomed, tapping the map moves the view. Press the
+  button again to close the map, or hold it to see the other world. The top screen lists each
+  dungeon's checks. With shuffled cracks, each crack you have gone through shows a line to where
+  it leads. The game keeps running while the map is open, and taps also reach the game. Seeds
+  made before version 0.3.2 have no map.
+
+The map's pictures are made from your own game files when you make a seed, and stay on your SD
+card in `/3ds/albw-rando/qol/`.
+
 ## Archipelago
 
 The app uses its own apworld, "A Link Between Worlds - 3DS", based on randomsalience's
@@ -58,7 +87,10 @@ albw-archipelago with new options. Patches for the original apworld (`.apalbw`) 
 4. When the host generates, drop your `.apalbw3ds` patch onto the same page, or copy it to
    `/3ds/albw-rando/ap/`.
 5. In the app, open Patch Files, pick the patch and choose Patch the Game.
-6. Connect to the multiworld from a computer with the ALBW Archipelago client and the 3DS plugin,
+6. Start the game from the app's Speed and QoL page, or turn on Load Every Time there. The top
+   screen shows a command such as `/3ds 192.168.1.20`; type it into the ALBW Archipelago client on
+   a computer on the same network. The app's own plugin answers the client, so no other plugin is
+   needed. Then connect to the multiworld from that client,
    as described in the apworld's setup guide. Any Archipelago server works, including private
    ones.
 

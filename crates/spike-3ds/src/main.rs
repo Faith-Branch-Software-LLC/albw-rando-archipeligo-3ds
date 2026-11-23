@@ -425,6 +425,8 @@ fn run_spike() {
         limit: budget * 1024 * 1024,
         usage: || CURRENT.load(Relaxed),
         clear_before_compress: !is_new,
+        largest_free: None,
+        headroom: 0,
     });
     let result = measure("full patch", || {
         // Loading the game comes before the first report from the patcher.

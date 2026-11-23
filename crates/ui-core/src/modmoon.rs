@@ -47,13 +47,30 @@ pub fn next_free_slot(active: Option<u32>, exists: impl Fn(u32) -> bool) -> u32 
 
 /// The contents of a slot's `desc.txt`. ModMoon shows only the first line and squeezes long text
 /// to fit, so the first line stays short and the details go on the lines after it.
-pub fn slot_description(seed: u32, preset: &str, hash: &str, mods: &[String]) -> String {
-    let mut text = format!("Seed {seed}\nALBW Randomizer\nPreset: {preset}\nHash: {hash}\n");
+/// A name the player typed, or empty for the default name, gives the first line.
+pub fn slot_description(seed: u32, title: &str, preset: &str, hash: &str, mods: &[String]) -> String {
+    let title = clean_title(title);
+    let mut text = if title.is_empty() {
+        format!("Seed {seed}\nALBW Randomizer\n")
+    } else {
+        format!("{title}\nALBW Randomizer\nSeed {seed}\n")
+    };
+    text.push_str(&format!("Preset: {preset}\nHash: {hash}\n"));
     for line in mods {
         text.push_str(line);
         text.push('\n');
     }
     text
+}
+
+/// The longest seed name, in letters. ModMoon squeezes longer first lines to fit.
+pub const TITLE_LENGTH: usize = 32;
+
+/// A seed name fit for the first line of `desc.txt`: one line, trimmed, at most `TITLE_LENGTH`
+/// letters. Empty when nothing is left.
+pub fn clean_title(name: &str) -> String {
+    let name: String = name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    name.trim().chars().take(TITLE_LENGTH).collect::<String>().trim().to_owned()
 }
 
 #[cfg(test)]
@@ -104,8 +121,16 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_name_is_the_first_line() {
+        let text = slot_description(7, "  My Race\nSeed  ", "Standard", "(Ravio)", &[]);
+        assert_eq!(text.lines().collect::<Vec<_>>(), ["My Race Seed", "ALBW Randomizer", "Seed 7", "Preset: Standard", "Hash: (Ravio)"]);
+        assert_eq!(slot_description(7, "   ", "Standard", "(Ravio)", &[]).lines().next(), Some("Seed 7"));
+        assert_eq!(clean_title(&"x".repeat(50)).len(), TITLE_LENGTH);
+    }
+
+    #[test]
     fn first_line_of_the_description_is_short() {
-        let text = slot_description(u32::MAX, "A very long preset name indeed", "(Ravio) (L) (Ravio) (R) (Ravio)", &["Model: Wolf".to_owned()]);
+        let text = slot_description(u32::MAX, "", "A very long preset name indeed", "(Ravio) (L) (Ravio) (R) (Ravio)", &["Model: Wolf".to_owned()]);
         assert!(text.ends_with("Model: Wolf\n"));
         assert_eq!(text.lines().next(), Some("Seed 4294967295"));
     }

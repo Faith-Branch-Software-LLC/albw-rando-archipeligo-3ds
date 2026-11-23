@@ -163,6 +163,15 @@ fn edit_seed(menu: &mut Menu, seed_was_typed: &mut bool, apt: &Apt, gfx: &Gfx) {
     }
 }
 
+fn edit_seed_title(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
+    let mut keyboard = SoftwareKeyboard::new(KeyboardKind::Normal, ButtonConfig::LeftRight);
+    keyboard.set_hint_text(Some("Seed name, up to 32 letters"));
+    keyboard.set_initial_text(Some(initial_text(&menu.seed_title)));
+    if let Ok((name, Button::Right)) = keyboard.launch(apt, gfx) {
+        menu.set_seed_title(&name);
+    }
+}
+
 /// Text for `SoftwareKeyboard::set_initial_text`, padded with one space.
 ///
 /// ctru-rs sizes the keyboard's starting text by its byte length and keeps the last slot for the
@@ -188,6 +197,9 @@ fn search_spoiler(menu: &mut Menu, apt: &Apt, gfx: &Gfx) {
         Err(_) => {}
     }
 }
+
+/// The QoL plugin's choices: timer, ZL action and ZR action, as numbers.
+const QOL_CHOICES: &str = "sdmc:/3ds/albw-rando/qol.txt";
 
 /// Where the Archipelago player name is kept between runs.
 const PLAYER_NAME: &str = "sdmc:/3ds/albw-rando/player-name.txt";
@@ -302,6 +314,14 @@ fn main() {
     let new_memory = is_new && heap >= NEW_3DS_MIN_HEAP && !simulate_old;
     let reserve = if new_memory { NEW_3DS_RESERVE_MB } else { OLD_3DS_RESERVE_MB };
     memory::start_pool(if new_memory { heap } else { heap.min(OLD_3DS_HEAP) }, reserve * 1024 * 1024);
+    // A New 3DS that opened with Old 3DS memory shows it in red, so the player can restart the app.
+    let low_memory = is_new && !new_memory;
+    let memory_label = if low_memory {
+        format!("Low memory: {:.0} MB, restart app", heap as f32 / MB)
+    } else {
+        format!("Memory {:.0} MB", heap as f32 / MB)
+    };
+    draw::set_corners(memory_label, low_memory);
 
     draw::start();
     let previews_work = model_view::start();
@@ -327,9 +347,7 @@ fn main() {
     let _ = fs::write(job::CHECK_LOG, check_log);
 
     let (preset_list, notes) = load_presets();
-    // The Old 3DS notice is for real Old 3DS consoles. A New 3DS that got less memory than usual
-    // gets its own message below instead.
-    let mut menu = Menu::new(random_seed(), preset_list, !is_new || simulate_old);
+    let mut menu = Menu::new(random_seed(), preset_list);
     let mut voices = voice::Voices::new();
     menu.set_mods(job::list_mods(job::MODEL_DIR), job::list_mods(job::VOICE_DIR));
     menu.game_location = game_location;
@@ -343,6 +361,21 @@ fn main() {
     if let Ok(name) = fs::read_to_string(PLAYER_NAME) {
         menu.set_player_name(&name);
     }
+    if let Ok(text) = fs::read_to_string(QOL_CHOICES) {
+        let numbers: Vec<usize> = text.split_whitespace().filter_map(|word| word.parse().ok()).collect();
+        // Timer, ZL action, ZR action, and (since 0.3.5) whether the plugin loads every time.
+        if let [timer, zl, zr, ref rest @ ..] = numbers[..] {
+            let always = rest.first().copied().unwrap_or(0).min(1);
+            menu.qol = [timer.min(1), zl.min(ui_core::menu::BUTTON_CHOICES.len() - 1), zr.min(ui_core::menu::BUTTON_CHOICES.len() - 1), always];
+        }
+    }
+    // A plugin that loads every time is replaced by this version's, in case the app was updated.
+    if menu.qol[3] == 1 {
+        if let Err(err) = job::set_always_load(true) {
+            job::log(&format!("Could not update the plugin in Luma's folder: {err}"));
+        }
+    }
+    let mut loads_every_time = menu.qol[3];
     menu.apworld_status = apworld_status(share::apworld_version());
     menu.app_version = env!("CARGO_PKG_VERSION").to_owned();
     if let Ok(text) = fs::read_to_string(AP_OPTIONS) {
@@ -352,15 +385,6 @@ fn main() {
     let mut sharing: Option<(share::Share, share::Content, Vec<String>)> = None;
     if !notes.is_empty() {
         menu.show_message("Preset Notes", &notes.join(" "));
-    }
-    if is_new && heap < NEW_3DS_MIN_HEAP {
-        menu.show_message(
-            "Less Memory Than Usual",
-            &format!(
-                "The console gave the app {:.0} MB to work with instead of the New 3DS's usual 96 MB, so it will work like on an Old 3DS, and seeds may take longer. This happens when another app, such as an installer, opens it. For all the memory, close the app and open it from the HOME Menu.",
-                heap as f32 / MB
-            ),
-        );
     }
     let mut seed_was_typed = false;
     let mut working: Option<progress::Screen> = None;
@@ -518,6 +542,24 @@ fn main() {
                 voices.play_sound(sound);
             }
         }
+        if std::mem::take(&mut menu.qol_changed) {
+            let [timer, zl, zr, always] = menu.qol;
+            if let Err(err) = fs::write(QOL_CHOICES, format!("{timer} {zl} {zr} {always}\n")) {
+                job::log(&format!("QoL choices not saved: {err}"));
+            }
+            if always != loads_every_time {
+                loads_every_time = always;
+                match job::set_always_load(always == 1) {
+                    Ok(details) => menu.show_message("Load Every Time", &details.join(" ")),
+                    Err(err) => {
+                        menu.qol[3] = 1 - always;
+                        loads_every_time = 1 - always;
+                        let _ = fs::write(QOL_CHOICES, format!("{timer} {zl} {zr} {}\n", 1 - always));
+                        menu.show_message("Load Every Time", &err);
+                    }
+                }
+            }
+        }
         match action {
             Action::None => {}
             Action::Exit => break 'app,
@@ -529,7 +571,16 @@ fn main() {
                 }
                 Err(text) => menu.show_message("Can't Copy the Game Files", &text),
             },
+            Action::PlayQol => match job::game_media().ok_or_else(|| "The game isn't installed or in the game card slot.".to_owned()).and_then(|media| job::start_qol(media, menu.qol)) {
+                // The app closes and the system starts the game with the plugin.
+                Ok(details) => {
+                    job::log(&details.join("\n"));
+                    break 'app;
+                }
+                Err(text) => menu.show_message("Can't Start the Game", &text),
+            },
             Action::EditSeed => edit_seed(&mut menu, &mut seed_was_typed, &apt, &gfx),
+            Action::EditSeedName => edit_seed_title(&mut menu, &apt, &gfx),
             Action::RandomSeed => {
                 menu.seed = random_seed();
                 seed_was_typed = false;
@@ -598,6 +649,7 @@ fn main() {
                 };
                 job::set_request(job::Request {
                     seed: 0,
+                    seed_title: String::new(),
                     seed_was_typed: false,
                     settings: Default::default(),
                     preset_name: String::new(),
@@ -618,6 +670,7 @@ fn main() {
             Action::Generate => {
                 job::set_request(job::Request {
                     seed: menu.seed,
+                    seed_title: menu.seed_title.clone(),
                     seed_was_typed,
                     settings: menu.rules.settings(),
                     preset_name: menu.preset_name.clone(),

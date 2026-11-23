@@ -77,10 +77,17 @@ pub struct Patcher {
     courses: HashMap<CourseId, Course>,
     /// When set, finished files go here at once instead of waiting in memory.
     stream_to: Option<PathBuf>,
+    /// The freestanding item locations that show their item's model, within the memory budget.
+    true_models: std::collections::HashSet<&'static str>,
+    /// The message font's glyph widths, for wrapping text.
+    font: std::rc::Rc<rom::font::Font>,
 }
 
 impl Patcher {
     pub fn new(game: Rom) -> Result<Self> {
+        // The font's archive needs about 10 MB in one piece for a moment, so it is read first,
+        // while memory is still empty. Only its glyph widths stay.
+        let font = std::rc::Rc::new(game.font()?);
         let boot = game.boot()?;
         Ok(Self {
             game,
@@ -89,6 +96,8 @@ impl Patcher {
             merchant: [Randomizable::Item(filler_item::Item::Empty); 3],
             courses: Default::default(),
             stream_to: None,
+            true_models: Default::default(),
+            font,
         })
     }
 
@@ -295,6 +304,11 @@ impl Patcher {
         }
 
         Ok(())
+    }
+
+    /// The message font, for wrapping text.
+    fn font(&mut self) -> Result<std::rc::Rc<rom::font::Font>> {
+        Ok(self.font.clone())
     }
 
     fn language<C>(&mut self, course: C) -> Result<&mut Language>
@@ -717,8 +731,15 @@ impl Patcher {
             item_actors.insert(item, actor.into_bytes());
         }
 
+        // Seeds 1 and 3 with open cross-world cracks crashed at boot in Azahar with both merge from
+        // the start and item models, and booted with either one alone. The cause is not known yet,
+        // so with merge from the start every loose item keeps its usual model.
+        if seed_info.settings.change_freestanding_models && !seed_info.settings.start_with_merge {
+            self.true_models = choose_true_models(seed_info, &item_actors);
+        }
+
         {
-            let Self { ref rentals, ref merchant, ref mut courses, .. } = self;
+            let Self { ref rentals, ref merchant, ref mut courses, ref true_models, .. } = self;
             let your_house_actors = courses.get_mut(&IndoorLight).unwrap().scenes.get_mut(&0).unwrap().actors_mut();
             for actor in rentals.iter().filter_map(|item| item_actors.get(&item.normalize())) {
                 your_house_actors.add(actor.clone())?;
@@ -730,8 +751,14 @@ impl Patcher {
             if seed_info.settings.change_freestanding_models {
                 for data in [HEART_PIECES.iter(), HEART_CONTAINERS.iter(), SMALL_KEYS.iter(), RUPEES.iter()] {
                     for (name, _, _, _) in data {
+                        if !true_models.contains(name) {
+                            continue;
+                        }
                         let item = seed_info.layout.get_by_name(name).normalize();
-                        common_archive.add(item_actors.get(&item).unwrap().clone())?;
+                        // These show the original rupee model, which ActorCommon already holds.
+                        if !code::is_recolored_rupee(&item) {
+                            common_archive.add(item_actors.get(&item).unwrap().clone())?;
+                        }
                     }
                 }
                 common_archive.add(item_actors.get(&Item::HeartPiece).unwrap().clone())?;
@@ -999,6 +1026,70 @@ fn log_spill(result: rom::Result<()>) {
     if let Err(err) = result {
         log::warn!("Could not move an archive to disk: {err}");
     }
+}
+
+/// How much the models of loose Heart Pieces, Heart Containers and rupees may add up to. The game
+/// loads every model in their lists into one memory area at launch, and going over it corrupts the
+/// GPU command buffer, which crashes a real 3DS. In Azahar tests, counting each distinct model as its
+/// file size plus 20 KB, a seed at about 427 KB crashed at boot and seeds up to about 420 KB were
+/// fine (counting 10 KB a model got these the wrong way round), so this leaves a margin.
+const BOOT_MODEL_BUDGET: usize = 300 * 1024;
+/// Small keys load their models with each dungeon instead, so they get a separate budget.
+const KEY_MODEL_BUDGET: usize = 200 * 1024;
+const MODEL_OVERHEAD: usize = 10 * 1024;
+
+/// Picks the freestanding locations that show their item's model. Major items go first, then the
+/// rest in order, while the budget lasts. The other locations keep their usual model.
+fn choose_true_models(
+    seed_info: &SeedInfo, item_actors: &HashMap<Item, File<Box<[u8]>>>,
+) -> std::collections::HashSet<&'static str> {
+    let model = |item: &Item| -> Option<(String, usize)> {
+        let item = if code::is_recolored_rupee(item) { &Item::RupeeG } else { item };
+        let file = item_actors.get(item)?;
+        let path = if code::is_recolored_rupee(item) { "World/Actor/Rupee.bch".to_owned() } else { file.path().to_owned() };
+        Some((path, file.get().len() + MODEL_OVERHEAD))
+    };
+    let groups: [(Vec<&[(&'static str, game::Course, u16, u16)]>, &[Item], usize); 2] = [
+        (vec![&HEART_PIECES[..], &HEART_CONTAINERS[..], &RUPEES[..]], &[Item::HeartPiece, Item::HeartContainer, Item::RupeeG], BOOT_MODEL_BUDGET),
+        (vec![&SMALL_KEYS[..]], &[Item::KeySmall], KEY_MODEL_BUDGET),
+    ];
+    let mut chosen = std::collections::HashSet::new();
+    for (lists, bases, budget) in groups {
+        let mut loaded = std::collections::HashSet::new();
+        let mut spent = 0;
+        // The usual models load either way.
+        for base in bases {
+            if let Some((path, size)) = model(base) {
+                if loaded.insert(path) {
+                    spent += size;
+                }
+            }
+        }
+        for major in [true, false] {
+            for (name, _, _, _) in lists.iter().flat_map(|list| list.iter()) {
+                let placed = seed_info.layout.get_by_name(name);
+                if placed.is_major_item() != major {
+                    continue;
+                }
+                // Fruit and shop shield models upset the game on loose items (seed 4 with a Foul
+                // Fruit on a boss's heart container crashed; seed 7 with a shield on Hyrule Castle
+                // Rocks misaligned the GPU buffer), so they keep the usual look.
+                if matches!(placed.normalize(), Item::EscapeFruit | Item::StopFruit | Item::ItemShield) {
+                    continue;
+                }
+                let Some((path, size)) = model(&placed.normalize()) else { continue };
+                if loaded.contains(&path) {
+                    chosen.insert(*name);
+                } else if spent + size <= budget {
+                    spent += size;
+                    loaded.insert(path);
+                    chosen.insert(*name);
+                }
+            }
+        }
+        info!("True item models: {} KB of {} KB used", spent / 1024, budget / 1024);
+    }
+    chosen
 }
 
 #[derive(Debug)]

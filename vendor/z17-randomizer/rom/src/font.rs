@@ -3,6 +3,7 @@ use bytey::*;
 use log::warn;
 use crate::{Error, Result};
 
+#[derive(Debug)]
 pub struct Font {
     glyph_widths: HashMap<u16, u8>,
     code_map: HashMap<u16, u16>,

@@ -15,14 +15,17 @@ OUT=target/cia
 mkdir -p "$OUT"
 
 # The CIA's version comes from the app's Cargo.toml, so the two always match. The title version
-# holds 6 bits of major, 6 of minor and 4 of micro, so a micro past 15 carries into the minor.
+# holds 6 bits of major, 6 of minor and 4 of micro, so the patch number must stay at 15 or below:
+# past that, raise the minor number and start the patch again at 0.
 VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/app-3ds/Cargo.toml | head -n 1)
 MAJOR=${VERSION%%.*}
 REST=${VERSION#*.}
 MINOR=${REST%%.*}
 MICRO=${REST#*.}
-MINOR=$((MINOR + MICRO / 16))
-MICRO=$((MICRO % 16))
+if [ "$MAJOR" -gt 63 ] || [ "$MINOR" -gt 63 ] || [ "$MICRO" -gt 15 ]; then
+  echo "Version $VERSION does not fit a CIA. Keep the patch number at 15 or below: raise the minor number and reset the patch to 0." >&2
+  exit 1
+fi
 
 # The HOME Menu sound is the app's start sound (friedspin's Cozy UI SFX, which may ship inside the
 # app but not as a loose file, so it stays out of git). Without it, the banner is silent.
@@ -59,4 +62,22 @@ BANNER_SOUND="$OUT/banner-sound.wav"
   -icon "$BUILT/albw-rando.smdh" -banner "$OUT/banner.bnr" \
   -DAPP_TITLE=ALBWRando -DAPP_PRODUCT_CODE=CTR-H-ALBW -DAPP_UNIQUE_ID=0xFA1B0 \
   -major "$MAJOR" -minor "$MINOR" -micro "$MICRO"
+# makerom v0.19.0 writes 0 for the minor number whatever it is given, which left every CIA at
+# 0.0.<patch>. So the title version goes into the ticket and the TMD here.
+python3 - "$OUT/albw-rando.cia" "$MAJOR" "$MINOR" "$MICRO" <<'PY'
+import struct, sys
+path, major, minor, micro = sys.argv[1], *map(int, sys.argv[2:])
+version = struct.pack(">H", major << 10 | minor << 4 | micro)
+data = bytearray(open(path, "rb").read())
+header, _, _, certs, ticket = struct.unpack_from("<IHHII", data)
+align = lambda size: (size + 63) // 64 * 64
+# Both are signed with RSA-2048 (type 0x10004): 4 bytes of type, 0x100 of signature, 0x3C of padding.
+body = 4 + 0x100 + 0x3C
+ticket_start = align(header) + align(certs)
+for start, field in ((ticket_start, 0xA6), (ticket_start + align(ticket), 0x9C)):
+    if struct.unpack_from(">I", data, start)[0] != 0x10004:
+        sys.exit("The CIA's ticket or TMD is not signed the way this script expects.")
+    data[start + body + field:start + body + field + 2] = version
+open(path, "wb").write(data)
+PY
 echo "Built $OUT/albw-rando.cia, version $VERSION"

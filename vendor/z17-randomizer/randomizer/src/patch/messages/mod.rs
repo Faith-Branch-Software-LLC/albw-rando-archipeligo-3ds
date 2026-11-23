@@ -105,7 +105,7 @@ fn patch_item_names(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
         // Repurpose Letter in a Bottle as Archipelago Item
         item_name.set("item_name_messagebottle", "Archipelago Item");
 
-        let font = patcher.game.font().unwrap();
+        let font = patcher.font().unwrap();
 
         // Ravio items
         for (index, item) in
@@ -190,7 +190,7 @@ fn patch_event_item_get(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<(
     if let Some(archipelago_info) = &seed_info.archipelago_info {
         msbt.set("message_bottle", "You got an Archipelago item!");
 
-        let font = patcher.game.font().unwrap();
+        let font = patcher.font().unwrap();
         for (_, archipelago_item) in &archipelago_info.items {
             let key = format!("ap_item_{}", archipelago_item.location_code);
             use crate::ClassificationType::*;
@@ -455,7 +455,7 @@ fn patch_hint_ghosts(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> 
     add_to_msbt_hint_map(&mut msbt_hint_map, &seed_info.hints.custom_hints)?;
 
     // Load Font for word-wrapping
-    let font = patcher.game.font().unwrap();
+    let font = patcher.font().unwrap();
 
     // Update the MSBT Files with the generated Hints
     for ((course, msbt_file), labels) in msbt_hint_map {

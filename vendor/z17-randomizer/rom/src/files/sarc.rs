@@ -35,24 +35,14 @@ impl Sarc {
         let Ok(mut inner) = self.0.try_borrow_mut() else {
             return Ok(());
         };
-        let (data, compressed) = match std::mem::replace(&mut *inner, Inner::Compressed(Box::default())) {
-            Inner::Decompressed(archive) => (archive.to_spill(), false),
-            Inner::Compressed(data) => (data, true),
-            other => {
-                *inner = other;
-                return Ok(());
-            }
+        // A decompressed archive is written file by file, so spilling needs no large block.
+        let (path, compressed) = match &*inner {
+            Inner::Decompressed(archive) => (spill::write_with(|out| archive.write_spill(out))?, false),
+            Inner::Compressed(data) => (spill::write(data)?, true),
+            _ => return Ok(()),
         };
-        match spill::write(&data) {
-            Ok(path) => {
-                *inner = Inner::Spilled(path, compressed);
-                Ok(())
-            }
-            Err(err) => {
-                *inner = if compressed { Inner::Compressed(data) } else { Inner::Decompressed(Archive::from_spill(&data)) };
-                Err(err.into())
-            }
-        }
+        *inner = Inner::Spilled(path, compressed);
+        Ok(())
     }
 
     fn decompress(&self) -> Result<Ref<'_, Archive>> {
@@ -150,8 +140,7 @@ impl Sarc {
             Inner::Decompressed(archive) => Self::from(compress(&archive.into_bytes())),
             Inner::Spilled(path, true) => Self::from(spill::take(&path).expect("spill file was just written")),
             Inner::Spilled(path, false) => {
-                let data = spill::take(&path).expect("spill file was just written");
-                Self::from(compress(&Archive::from_spill(&data).into_bytes()))
+                Self::from(compress(&Archive::load_spill(&path).expect("spill file was just written").into_bytes()))
             }
         }
     }
@@ -167,7 +156,7 @@ impl IntoBytes for Sarc {
             Inner::Decompressed(archive) => archive.into_bytes(),
             Inner::Spilled(path, true) => spill::take(&path).expect("spill file was just written"),
             Inner::Spilled(path, false) => {
-                Archive::from_spill(&spill::take(&path).expect("spill file was just written")).into_bytes()
+                Archive::load_spill(&path).expect("spill file was just written").into_bytes()
             }
         }
     }
@@ -191,19 +180,24 @@ pub enum Inner {
 impl Inner {
     fn decompress(&mut self) -> Result<&mut Archive> {
         if let Self::Spilled(path, compressed) = self {
-            let data = spill::take(path)?;
-            *self = if *compressed { Self::Compressed(data) } else { Self::Decompressed(Archive::from_spill(&data)) };
+            *self = if *compressed { Self::Compressed(spill::take(path)?) } else { Self::Decompressed(Archive::load_spill(path)?) };
         }
         if let Self::OnRom(source, path) = self {
             let data = source.borrow_mut().read(path.clone())?;
             *self = Self::Compressed(data.into_inner());
         }
         if let Self::Compressed(data) = self {
-            *self = Self::Decompressed(Archive::from(
-                yaz0::decompress(&data)
-                    .map_err(|_| Error::new("Archive could not be decompressed.".to_string()))?
-                    .into(),
-            )?);
+            // Unpacking file by file needs no block the size of the whole archive. An archive
+            // laid out in a way that cannot be unpacked in order takes the old way.
+            let archive = match Archive::from_yaz0(data) {
+                Ok(archive) => archive,
+                Err(_) => Archive::from(
+                    yaz0::decompress(data)
+                        .map_err(|_| Error::new("Archive could not be decompressed.".to_string()))?
+                        .into(),
+                )?,
+            };
+            *self = Self::Decompressed(archive);
         }
         match self {
             Self::Decompressed(archive) => Ok(archive),
@@ -263,31 +257,49 @@ impl Archive {
         }
     }
 
-    /// Writes every file with its exact length. SARC cannot do this, because its entries include
-    /// the padding after each file, and some game files reject that padding when read back.
-    fn to_spill(self) -> Box<[u8]> {
-        let size = 8 + self.files.values().map(|file| 8 + file.len()).sum::<usize>();
-        let mut out = Vec::with_capacity(size);
-        out.extend_from_slice(&self.multiplier.to_le_bytes());
-        out.extend_from_slice(&(self.files.len() as u32).to_le_bytes());
-        for (hash, file) in self.files {
-            out.extend_from_slice(&hash.to_le_bytes());
-            out.extend_from_slice(&(file.len() as u32).to_le_bytes());
-            out.extend_from_slice(&file);
-        }
-        out.into()
+    /// Decompresses Yaz0 data straight into separate files, so no block holds the whole archive.
+    /// Gives the same result as decompressing and then calling [`Archive::from`].
+    fn from_yaz0(data: &[u8]) -> Result<Self> {
+        let mut unpacker = Unpacker::default();
+        let total = yaz0::decompress_with(data, |piece| unpacker.feed(piece))?;
+        unpacker.finish(total)
     }
 
-    fn from_spill(data: &[u8]) -> Self {
-        let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
-        let mut files = BTreeMap::new();
-        let mut at = 8;
-        for _ in 0..word(4) {
-            let (hash, len) = (word(at), word(at + 4) as usize);
-            files.insert(hash, data[at + 8..at + 8 + len].to_vec());
-            at += 8 + len;
+    /// Writes every file with its exact length. SARC cannot do this, because its entries include
+    /// the padding after each file, and some game files reject that padding when read back.
+    fn write_spill(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        out.write_all(&self.multiplier.to_le_bytes())?;
+        out.write_all(&(self.files.len() as u32).to_le_bytes())?;
+        for (hash, file) in &self.files {
+            out.write_all(&hash.to_le_bytes())?;
+            out.write_all(&(file.len() as u32).to_le_bytes())?;
+            out.write_all(file)?;
         }
-        Self { multiplier: word(0), files }
+        Ok(())
+    }
+
+    /// Reads back what `write_spill` wrote, one file at a time, and deletes the spill file.
+    fn load_spill(path: &std::path::PathBuf) -> std::io::Result<Self> {
+        use std::io::Read;
+        fn word(input: &mut impl Read) -> std::io::Result<u32> {
+            let mut bytes = [0; 4];
+            input.read_exact(&mut bytes)?;
+            Ok(u32::from_le_bytes(bytes))
+        }
+        let mut input = spill::open(path)?;
+        let multiplier = word(&mut input)?;
+        let count = word(&mut input)?;
+        let mut files = BTreeMap::new();
+        for _ in 0..count {
+            let hash = word(&mut input)?;
+            let len = word(&mut input)? as usize;
+            let mut file = vec![0; len];
+            input.read_exact(&mut file)?;
+            files.insert(hash, file);
+        }
+        drop(input);
+        spill::done(path);
+        Ok(Self { multiplier, files })
     }
 
     fn hash(&self, path: &str) -> u32 {
@@ -318,6 +330,145 @@ impl Archive {
         } else {
             self.files.insert(self.hash(&file.path), file.inner.into());
         }
+    }
+}
+
+/// Splits a SARC into its files as its bytes arrive.
+#[derive(Default)]
+struct Unpacker {
+    /// Everything before the file data: the header and the file table.
+    head: Vec<u8>,
+    data_offset: Option<usize>,
+    multiplier: u32,
+    /// Each file as (hash, start, end) within the file data, in order.
+    nodes: Vec<(u32, usize, usize)>,
+    next: usize,
+    current: Vec<u8>,
+    files: BTreeMap<u32, Vec<u8>>,
+    /// Bytes received so far.
+    position: usize,
+    /// The archive's length as its header gives it.
+    stated_len: usize,
+}
+
+impl Unpacker {
+    fn word(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    fn half(bytes: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
+    }
+
+    /// Reads the file table once the head has arrived.
+    fn read_table(&mut self, data_offset: usize) -> Result<()> {
+        let head = &self.head;
+        if head.len() < 0x20 || &head[0x14..0x18] != b"SFAT" {
+            return Err(Error::new("SARC has no file table".to_string()));
+        }
+        let count = Self::half(head, 0x1A) as usize;
+        self.multiplier = Self::word(head, 0x1C);
+        let table_end = 0x20 + 0x10 * count;
+        if table_end > data_offset {
+            return Err(Error::new("SARC file table runs into its data".to_string()));
+        }
+        let mut nodes = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = 0x20 + 0x10 * index;
+            if Self::word(head, at + 4) != 0 {
+                return Err(Error::new("Hash collision".to_string()));
+            }
+            let (start, end) = (Self::word(head, at + 8) as usize, Self::word(head, at + 12) as usize);
+            if end < start {
+                return Err(Error::new("SARC file ends before it starts".to_string()));
+            }
+            nodes.push((Self::word(head, at), start, end));
+        }
+        nodes.sort_by_key(|&(_, start, end)| (start, end));
+        // Files that share bytes would need the data twice, which this cannot do.
+        if nodes.windows(2).any(|pair| pair[1].1 < pair[0].2) {
+            return Err(Error::new("SARC files overlap".to_string()));
+        }
+        // Two entries with one hash would replace each other, as in `Archive::from`, but in another
+        // order than here.
+        if nodes.iter().map(|node| node.0).collect::<std::collections::BTreeSet<_>>().len() != nodes.len() {
+            return Err(Error::new("SARC has a repeated hash".to_string()));
+        }
+        self.nodes = nodes;
+        self.data_offset = Some(data_offset);
+        self.head = Vec::new();
+        Ok(())
+    }
+
+    fn feed(&mut self, mut piece: &[u8]) -> Result<()> {
+        loop {
+            let Some(data_offset) = self.data_offset else {
+                if piece.is_empty() {
+                    return Ok(());
+                }
+                // The header says where the file data starts.
+                let wanted = if self.head.len() < 0x14 { 0x14 } else { Self::word(&self.head, 0xC) as usize };
+                let count = piece.len().min(wanted - self.head.len());
+                self.head.extend_from_slice(&piece[..count]);
+                piece = &piece[count..];
+                self.position += count;
+                if self.head.len() == 0x14 && wanted == 0x14 {
+                    if &self.head[..4] != b"SARC" || Self::half(&self.head, 4) != 0x14 || Self::half(&self.head, 6) != 0xFEFF {
+                        return Err(Error::new("Not a SARC archive".to_string()));
+                    }
+                    self.stated_len = Self::word(&self.head, 8) as usize;
+                    let offset = Self::word(&self.head, 0xC) as usize;
+                    if offset < 0x20 {
+                        return Err(Error::new("SARC data starts inside its header".to_string()));
+                    }
+                } else if self.head.len() == wanted {
+                    self.read_table(wanted)?;
+                }
+                continue;
+            };
+            let at = self.position - data_offset;
+            // Store every file that is complete.
+            while let Some(&(hash, start, end)) = self.nodes.get(self.next) {
+                if at >= start && self.current.len() == end - start {
+                    self.files.insert(hash, std::mem::take(&mut self.current));
+                    self.next += 1;
+                } else {
+                    break;
+                }
+            }
+            if piece.is_empty() {
+                return Ok(());
+            }
+            let Some(&(_, start, end)) = self.nodes.get(self.next) else {
+                // Padding after the last file.
+                self.position += piece.len();
+                return Ok(());
+            };
+            let count = if at < start {
+                piece.len().min(start - at)
+            } else {
+                if self.current.capacity() == 0 {
+                    self.current.reserve_exact(end - start);
+                }
+                let count = piece.len().min(end - at);
+                self.current.extend_from_slice(&piece[..count]);
+                count
+            };
+            piece = &piece[count..];
+            self.position += count;
+        }
+    }
+
+    fn finish(mut self, total: usize) -> Result<Archive> {
+        self.feed(&[])?;
+        let Some(_) = self.data_offset else {
+            return Err(Error::new("SARC ended inside its header".to_string()));
+        };
+        // `Archive::from` takes only archives whose stated length matches their data.
+        if self.next != self.nodes.len() || self.position != total || self.stated_len != total {
+            return Err(Error::new("SARC ended inside a file".to_string()));
+        }
+        Ok(Archive { multiplier: self.multiplier, files: self.files })
     }
 }
 
@@ -369,5 +520,68 @@ mod tests {
     #[test]
     fn it_works() {
         assert_eq!(2 + 2, 4);
+    }
+}
+
+#[cfg(test)]
+mod unpack_tests {
+    use super::*;
+
+    /// Builds a SARC with the given files, the way the game's archives are laid out.
+    fn sarc(files: &[(u32, &[u8])]) -> Vec<u8> {
+        let count = files.len();
+        let head = 0x20 + 0x10 * count + 8;
+        let data_offset = (head + 0x7F) & !0x7F;
+        let mut data = Vec::new();
+        let mut nodes = Vec::new();
+        for (hash, file) in files {
+            let start = data.len();
+            data.extend_from_slice(file);
+            nodes.push((*hash, start, data.len()));
+            data.resize((data.len() + 0x7F) & !0x7F, 0);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"SARC");
+        out.extend_from_slice(&0x14u16.to_le_bytes());
+        out.extend_from_slice(&0xFEFFu16.to_le_bytes());
+        out.extend_from_slice(&((data_offset + data.len()) as u32).to_le_bytes());
+        out.extend_from_slice(&(data_offset as u32).to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(b"SFAT");
+        out.extend_from_slice(&0xCu16.to_le_bytes());
+        out.extend_from_slice(&(count as u16).to_le_bytes());
+        out.extend_from_slice(&0x65u32.to_le_bytes());
+        for (hash, start, end) in nodes {
+            for value in [hash, 0, start as u32, end as u32] {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(b"SFNT");
+        out.extend_from_slice(&[0; 4]);
+        out.resize(data_offset, 0);
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    fn unpacking_in_pieces_matches_unpacking_whole() {
+        let big: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let repeated = vec![9u8; 70_000];
+        let raw = sarc(&[(3, &big), (1, b"tiny"), (7, &[]), (5, &repeated)]);
+        let packed = yaz0::compress(&raw);
+        let whole = Archive::from(yaz0::decompress(&packed).unwrap().into()).unwrap();
+        let pieces = Archive::from_yaz0(&packed).unwrap();
+        assert_eq!(whole.multiplier, pieces.multiplier);
+        assert_eq!(whole.files, pieces.files);
+        assert_eq!(pieces.files[&3], big);
+        assert!(pieces.files[&7].is_empty());
+    }
+
+    #[test]
+    fn a_cut_short_archive_is_refused() {
+        let raw = sarc(&[(3, b"some file data")]);
+        let mut cut = raw[..raw.len() - 4].to_vec();
+        cut[8..12].copy_from_slice(&(raw.len() as u32).to_le_bytes());
+        assert!(Archive::from_yaz0(&yaz0::compress(&cut)).is_err());
     }
 }

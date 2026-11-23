@@ -5,6 +5,7 @@
 
 use std::{
     fs,
+    io::{BufReader, BufWriter, Read, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed},
@@ -24,6 +25,18 @@ pub struct Budget {
     /// Moves every archive to disk before compressing, when memory is too tight for compression
     /// to work beside them.
     pub clear_before_compress: bool,
+    /// Reports the largest block that could be allocated now, when memory can split into pieces.
+    /// Archives also leave memory when this drops below `headroom`, since a large archive needs
+    /// one block for itself even when the total in use is low.
+    pub largest_free: Option<fn() -> usize>,
+    /// The largest free block to keep, in bytes.
+    pub headroom: usize,
+}
+
+impl Budget {
+    fn tight(&self) -> bool {
+        (self.usage)() > self.limit || self.largest_free.is_some_and(|largest| largest() < self.headroom)
+    }
 }
 
 /// Totals for one run.
@@ -57,12 +70,12 @@ pub fn clear_before_compress() -> bool {
 
 /// Whether archives should leave memory now.
 pub fn over_limit() -> bool {
-    BUDGET.lock().unwrap().as_ref().is_some_and(|budget| (budget.usage)() > budget.limit)
+    BUDGET.lock().unwrap().as_ref().is_some_and(Budget::tight)
 }
 
 /// Whether a read should free its archive. With no budget set, reads always do.
 pub(crate) fn release_after_read() -> bool {
-    BUDGET.lock().unwrap().as_ref().map_or(true, |budget| (budget.usage)() > budget.limit)
+    BUDGET.lock().unwrap().as_ref().map_or(true, Budget::tight)
 }
 
 /// Clears the budget, deletes any spill files, and returns the totals.
@@ -78,6 +91,11 @@ pub fn finish() -> Stats {
 }
 
 pub(crate) fn write(data: &[u8]) -> std::io::Result<PathBuf> {
+    write_with(|out| out.write_all(data))
+}
+
+/// Writes a spill file piece by piece, so the data never needs one large block in memory.
+pub(crate) fn write_with(fill: impl FnOnce(&mut dyn Write) -> std::io::Result<()>) -> std::io::Result<PathBuf> {
     let dir = BUDGET
         .lock()
         .unwrap()
@@ -86,10 +104,44 @@ pub(crate) fn write(data: &[u8]) -> std::io::Result<PathBuf> {
         .ok_or_else(|| std::io::Error::other("no spill folder set"))?;
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.bin", NEXT_ID.fetch_add(1, Relaxed)));
-    fs::write(&path, data)?;
+    let mut out = CountingWriter { inner: BufWriter::with_capacity(32 * 1024, fs::File::create(&path)?), written: 0 };
+    let result = fill(&mut out).and_then(|()| out.inner.flush());
+    if let Err(err) = result {
+        drop(out);
+        let _ = fs::remove_file(&path);
+        return Err(err);
+    }
     SPILLS.fetch_add(1, Relaxed);
-    BYTES_WRITTEN.fetch_add(data.len(), Relaxed);
+    BYTES_WRITTEN.fetch_add(out.written, Relaxed);
     Ok(path)
+}
+
+struct CountingWriter<W> {
+    inner: W,
+    written: usize,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let count = self.inner.write(data)?;
+        self.written += count;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Opens a spill file for reading piece by piece. The file is deleted once read with [`done`].
+pub(crate) fn open(path: &PathBuf) -> std::io::Result<impl Read> {
+    Ok(BufReader::with_capacity(32 * 1024, fs::File::open(path)?))
+}
+
+/// Deletes a spill file that [`open`] has read.
+pub(crate) fn done(path: &PathBuf) {
+    let _ = fs::remove_file(path);
+    RELOADS.fetch_add(1, Relaxed);
 }
 
 pub(crate) fn take(path: &PathBuf) -> std::io::Result<Box<[u8]>> {

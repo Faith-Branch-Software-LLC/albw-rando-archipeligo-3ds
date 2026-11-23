@@ -23,6 +23,7 @@ static SMALL_PEAK: AtomicUsize = AtomicUsize::new(0);
 static POOL: Mutex<Pool> = Mutex::new(Pool::empty());
 const LARGE: usize = 64 * 1024;
 const POOL_BYTES: usize = 256 * 1024 * 1024;
+static IN_REPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn add(size: usize, small: bool) {
     let now = CURRENT.fetch_add(size, Relaxed) + size;
@@ -38,10 +39,46 @@ fn add(size: usize, small: bool) {
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.size() >= LARGE {
-            let ptr = POOL.lock().unwrap().alloc(layout.size(), layout.align());
+            // Read before the lock: the environment's strings come back through this allocator.
+            let want_map = std::env::var_os("POOL_MAP").is_some();
+            let (ptr, used, largest, map) = {
+                let mut pool = POOL.lock().unwrap();
+                let ptr = pool.alloc(layout.size(), layout.align());
+                let map = if ptr.is_null() && want_map {
+                    let mut map = [0u8; 4096];
+                    let mut len = 0;
+                    for (offset, size, in_use) in pool.blocks() {
+                        if len + 40 < map.len() {
+                            use std::io::Write;
+                            let mut cursor = std::io::Cursor::new(&mut map[len..]);
+                            let _ = write!(cursor, "{}{:.2}@{:.1} ", if in_use { "U" } else { "f" }, size as f32 / 1048576.0, offset as f32 / 1048576.0);
+                            len += cursor.position() as usize;
+                        }
+                    }
+                    Some((map, len))
+                } else {
+                    None
+                };
+                (ptr, pool.used(), pool.largest_free(), map)
+            };
+            if let Some((map, len)) = map {
+                eprintln!("POOL MAP: {}", String::from_utf8_lossy(&map[..len]));
+            }
             if !ptr.is_null() {
                 add(layout.size(), false);
                 return ptr;
+            }
+            // With POOL_MB set, the pool is as small as a console's, and a block that does not fit
+            // is where the console would run out of memory. The run goes on with system memory.
+            if std::env::var_os("POOL_MB").is_some() && !IN_REPORT.swap(true, Relaxed) {
+                eprintln!(
+                    "POOL FULL: asked {:.2} MB, pool used {:.1} MB, largest gap {:.1} MB\n{}",
+                    layout.size() as f32 / 1048576.0,
+                    used as f32 / 1048576.0,
+                    largest as f32 / 1048576.0,
+                    std::backtrace::Backtrace::force_capture()
+                );
+                IN_REPORT.store(false, Relaxed);
             }
         }
         let ptr = unsafe { System.alloc(layout) };
@@ -104,7 +141,8 @@ fn default_settings() -> Settings {
 fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
     let settings = default_settings();
     let start = Instant::now();
-    let seed_info = randomizer::build_seed(1, settings).expect("fill");
+    let seed = std::env::var("SEED").ok().and_then(|seed| seed.parse().ok()).unwrap_or(1);
+    let seed_info = randomizer::build_seed(seed, settings).expect("fill");
     println!("fill: {:.2} s, peak {:.1} MB", start.elapsed().as_secs_f32(), peak_mb());
 
     let start = Instant::now();
@@ -133,6 +171,8 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
             limit: budget_mb * 1024 * 1024,
             usage: || CURRENT.load(Relaxed),
             clear_before_compress: budget_mb < 30,
+            largest_free: Some(|| POOL.lock().unwrap().largest_free()),
+            headroom: std::env::var("HEADROOM_MB").ok().and_then(|mb| mb.parse().ok()).unwrap_or(9) * 1024 * 1024,
         });
     }
     randomizer::patch_loaded(&seed_info, game, Path::new(output), Some(&progress)).expect("patch");
@@ -150,6 +190,22 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
     );
 }
 
+/// Prints each location's course, stage and position, for the logic map's table.
+fn positions(rom_path: &str) {
+    let game = rom::Rom::load(rom_path).expect("load ROM");
+    for (subregion, course, name, patch) in randomizer::regions::locations() {
+        let place = randomizer::tracker::patch_place(patch, course);
+        let position = place.and_then(|(course, stage, unq)| {
+            let mut stage_file = game.stage(course, stage - 1).ok()?;
+            let obj = stage_file.get_obj(unq)?;
+            Some((obj.srt.translate.x, obj.srt.translate.z))
+        });
+        let (course, stage) = place.map_or(("-".to_owned(), 0), |(course, stage, _)| (format!("{course:?}"), stage));
+        let (x, z) = position.unwrap_or((f32::NAN, f32::NAN));
+        println!("{}\t{}\t{:?}\t{}\t{}\t{}\t{:.0}\t{:.0}", subregion.name(), subregion.id(), subregion.world(), name, course, stage, x, z);
+    }
+}
+
 fn fill_only() {
     for seed in [1u32, 2, 3] {
         let start = Instant::now();
@@ -162,11 +218,52 @@ fn fill_only() {
 }
 
 fn main() {
-    let memory = unsafe { System.alloc(Layout::from_size_align(POOL_BYTES, 16).unwrap()) };
+    // POOL_MB sets a console-sized pool, such as 30.7 for an Old 3DS.
+    let pool_bytes = std::env::var("POOL_MB")
+        .ok()
+        .and_then(|mb| mb.parse::<f32>().ok())
+        .map_or(POOL_BYTES, |mb| (mb * 1048576.0) as usize & !15);
+    let memory = unsafe { System.alloc(Layout::from_size_align(pool_bytes, 16).unwrap()) };
     // SAFETY: The memory is never freed and used only by the pool.
-    unsafe { POOL.lock().unwrap().init(memory, POOL_BYTES) };
+    unsafe { POOL.lock().unwrap().init(memory, pool_bytes) };
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [command, rom_path] if command == "positions" => positions(rom_path),
+        [command, dir] if command == "mapcases" => {
+            let seed = std::env::var("SEED").ok().and_then(|seed| seed.parse().ok()).unwrap_or(1);
+            let seed_info = randomizer::build_seed(seed, default_settings()).expect("fill");
+            let started = Instant::now();
+            let data = randomizer::tracker::map_data(&seed_info);
+            println!("map file: {} bytes in {:?}", data.len(), started.elapsed());
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(Path::new(dir).join("albw-map.bin"), data).unwrap();
+            for (step, (checked, status)) in randomizer::tracker::test_steps(&seed_info, 8).into_iter().enumerate() {
+                let text: String = checked.iter().zip(&status).map(|(c, s)| format!("{} {}\n", *c as u8, s)).collect();
+                std::fs::write(Path::new(dir).join(format!("case-{step}.txt")), text).unwrap();
+            }
+        }
+        [command] if command == "spoiler" => {
+            // Prints the seed's layout and cracks as JSON, like a spoiler log.
+            let seed = std::env::var("SEED").ok().and_then(|seed| seed.parse().ok()).unwrap_or(1);
+            let seed_info = randomizer::build_seed(seed, default_settings()).expect("fill");
+            println!("{}", serde_json::to_string_pretty(&seed_info).unwrap());
+        }
+        [command, rom_path, dir, files @ ..] if command == "romfiles" => {
+            // Copies files out of the ROM's RomFS, for looking at them.
+            let game = rom::Rom::load(rom_path).expect("load ROM");
+            std::fs::create_dir_all(dir).unwrap();
+            for file in files {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.open(file))) {
+                    Ok(data) => std::fs::write(Path::new(dir).join(file.replace('/', "_")), data).unwrap(),
+                    Err(_) => println!("not found: {file}"),
+                }
+            }
+        }
+        [command, path] if command == "byaml" => {
+            let data = std::fs::read(path).expect("read");
+            let value: serde_json::Value = rom::byaml::from_bytes(&data).expect("parse");
+            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        }
         [rom_path, output] => patch(rom_path, output, None),
         [rom_path, output, budget] => patch(rom_path, output, Some(budget.parse().expect("budget in MB"))),
         _ => fill_only(),

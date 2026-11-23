@@ -217,7 +217,7 @@ pub fn create(patcher: &Patcher, seed_info: &SeedInfo) -> Code {
         archipelago_mother_maiamai(&mut code, &seed_info.mother_maiamai_costs);
     }
     if seed_info.settings.change_freestanding_models {
-        item_models(&mut code, &seed_info.layout, &actor_names);
+        item_models(&mut code, &seed_info.layout, &actor_names, &patcher.true_models);
     }
     pause_menu_warp(&mut code);
     purple_potion_bottles(&mut code, &seed_info.settings);
@@ -1370,7 +1370,7 @@ fn archipelago_mother_maiamai(code: &mut Code, mother_maiamai_costs: &[u8]) {
 }
 
 /// Replace freestanding item models
-fn item_models(code: &mut Code, layout: &Layout, actor_names: &HashMap<Item, u32>) {
+fn item_models(code: &mut Code, layout: &Layout, actor_names: &HashMap<Item, u32>, true_models: &std::collections::HashSet<&'static str>) {
     // Load heart piece / container BCH index from arg 0
     code.patch(0x334cb4, [ldrh(R2, (R4, 0x2C))]);
     // Load small key BCH index from arg 2
@@ -1389,14 +1389,15 @@ fn item_models(code: &mut Code, layout: &Layout, actor_names: &HashMap<Item, u32
         code.freespace().declare((orig_bch as u32).to_le_bytes());
         code.freespace().declare(
             data
-                .flat_map(|(name, _, _, _)|
-                    VTABLE_STRING.to_le_bytes()
-                        .into_iter()
-                        .chain(actor_names
-                            .get(&layout.get_by_name(name).normalize())
-                            .unwrap()
-                            .to_le_bytes()
-                            .into_iter()))
+                .flat_map(|(name, _, _, _)| {
+                    // Locations past the memory budget keep the usual model.
+                    let model = if true_models.contains(name) {
+                        freestanding_model(&layout.get_by_name(name).normalize(), actor_names)
+                    } else {
+                        orig_bch as u32
+                    };
+                    VTABLE_STRING.to_le_bytes().into_iter().chain(model.to_le_bytes())
+                })
                 .collect::<Vec<_>>()
         );
         code.overwrite(offset, bch_list.to_le_bytes());
@@ -1411,6 +1412,24 @@ fn item_models(code: &mut Code, layout: &Layout, actor_names: &HashMap<Item, u32
     // Get models from ActorCommon instead of stage archive
     code.overwrite(0x693b0c, [0]);
     code.overwrite(0x693b0d, [0]);
+}
+
+/// The original rupee model's name, "Rupee".
+const RUPEE_MODEL_NAME: u32 = 0x5d639c;
+
+/// The model a freestanding item shows. Green, blue, red and purple rupees use the game's own rupee
+/// model: the recolored copies are the same model under new names, and loading them alongside the
+/// original corrupts the GPU command buffer at launch, which crashes a real 3DS.
+pub fn freestanding_model(item: &Item, actor_names: &HashMap<Item, u32>) -> u32 {
+    if is_recolored_rupee(item) {
+        RUPEE_MODEL_NAME
+    } else {
+        *actor_names.get(item).unwrap()
+    }
+}
+
+pub fn is_recolored_rupee(item: &Item) -> bool {
+    matches!(item, Item::RupeeG | Item::RupeeB | Item::RupeeR | Item::RupeePurple)
 }
 
 fn pause_menu_warp(code: &mut Code) {

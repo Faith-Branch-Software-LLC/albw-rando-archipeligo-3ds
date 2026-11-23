@@ -140,7 +140,6 @@ const REPEAT_EVERY: u32 = 5;
 const DRAG_START: f32 = 6.0;
 const MOD_NAME_WIDTH: usize = 16;
 
-pub const COMPUTER_INSTRUCTIONS: &str = "github.com/rickfay/z17-randomizer";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Buttons {
@@ -191,6 +190,8 @@ pub enum Action {
     Exit,
     /// Open the number keyboard for the seed.
     EditSeed,
+    /// Open the keyboard for the seed's name, then call `set_seed_title`.
+    EditSeedName,
     /// Pick a new random seed.
     RandomSeed,
     /// Open the keyboard to name a preset, then save it.
@@ -221,6 +222,8 @@ pub enum Action {
     CopyGameFiles,
     /// List the seeds in the app's folder, then call `show_seeds`.
     ListSeeds,
+    /// Start the game with the QoL plugin and the choices in `Menu::qol`.
+    PlayQol,
     /// Make the seed with this folder name the one the game plays, or play unrandomized for None.
     UseSeed(Option<String>),
     /// Save who switches seeds: true for ModMoon, false for this app.
@@ -229,7 +232,6 @@ pub enum Action {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
-    OldWarning,
     Home,
     Categories,
     Options(usize),
@@ -267,6 +269,8 @@ pub enum Page {
     AskSeedSwitcher,
     /// Settings for the app itself, not for seeds.
     AppSettings,
+    /// The QoL plugin's choices: the speedrun timer and what ZL and ZR do.
+    Qol,
 }
 
 /// A seed in the app's folder, for the seeds page.
@@ -298,9 +302,23 @@ pub enum Look {
     FreestandingModels,
 }
 
+/// A choice for the QoL plugin, by index into `Menu::qol`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Qol {
+    Timer = 0,
+    Zl = 1,
+    Zr = 2,
+    /// Whether Luma loads the plugin for every launch of the game, not only from this page.
+    AlwaysLoad = 3,
+}
+
+const TIMER_CHOICES: [&str; 2] = ["Off", "On"];
+/// What ZL or ZR can do, in the order of the plugin's action numbers.
+pub const BUTTON_CHOICES: [&str; 3] = ["Nothing", "Logic Map", "Timer"];
+
 /// The seed page's last row, which starts the run.
 const START_RANDOMIZING: &str = "Start Randomizing";
-const CONFIRM_START: usize = 2;
+const CONFIRM_START: usize = 3;
 
 const LOOK_CHOICES: [&str; 3] = ["As Patched", "On", "Off"];
 
@@ -348,6 +366,7 @@ enum Target {
     SavePreset,
     ReplacePreset,
     EditSeed,
+    EditSeedName,
     RandomSeed,
     Generate,
     Back,
@@ -366,6 +385,8 @@ enum Target {
     ApFromRules,
     ApDefaults,
     Look(Look),
+    Qol(Qol),
+    PlayQol,
     ApplyPatch,
     ListSeeds,
     /// A seed by index into `seeds`, or None to play unrandomized.
@@ -448,6 +469,8 @@ pub struct Menu {
     stack: Vec<Place>,
     pub rules: Rules,
     pub seed: u32,
+    /// The name the player gave the next seed, or empty for "Seed <number>".
+    pub seed_title: String,
     pub preset_name: String,
     /// Where the game was found, shown on the home page.
     pub game_location: String,
@@ -480,6 +503,11 @@ pub struct Menu {
     patch_files: Vec<String>,
     seeds: Vec<SeedEntry>,
     patch: PatchSummary,
+    /// The QoL plugin's choices, by `Qol`: timer off or on, ZL's and ZR's action, and whether it
+    /// loads for every launch.
+    pub qol: [usize; 4],
+    /// Set when `qol` changes, until the app saves it.
+    pub qol_changed: bool,
     /// Choices for each `Look`, as indexes into `LOOK_CHOICES`.
     looks: [usize; 2],
     /// The Archipelago slot name for options files.
@@ -513,6 +541,7 @@ const CREDITS: &[(&str, &str, &str)] = &[
     ("Archipelago Original", "randomsalience", "Made the original Archipelago version of the randomizer and its apworld, the base this app's Archipelago support builds on. github.com/randomsalience/albw-archipelago"),
     ("Archipelago Update", "Faith Branch Software LLC", "Updated the Archipelago version for this app: new options, patching on the 3DS, and the albw.local page."),
     ("Archipelago", "Archipelago team", "The multiworld randomizer this works with. archipelago.gg"),
+    ("3DS Connection", "LittleCube", "Thanks for albw-ap-plugin, which first connected the Archipelago client to ALBW on a real 3DS. This app's plugin speaks the same protocol with its own code. github.com/LittleCube-hax/albw-ap-plugin"),
     ("3DS Toolchain", "devkitPro", "devkitARM, libctru, citro3d and citro2d. devkitpro.org"),
     ("Rust on 3DS", "rust3ds", "ctru-rs and cargo-3ds. github.com/rust3ds"),
     ("Title Font", "Omni Jacala", "Hylia Serif."),
@@ -551,16 +580,13 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 impl Menu {
-    /// `old_3ds` starts on a notice about what that console can do.
-    pub fn new(seed: u32, presets: Vec<Preset>, old_3ds: bool) -> Self {
-        let mut stack = vec![Place { page: Page::Home, focus: 0, scroll: 0.0 }];
-        if old_3ds {
-            stack.push(Place { page: Page::OldWarning, focus: 0, scroll: 0.0 });
-        }
+    pub fn new(seed: u32, presets: Vec<Preset>) -> Self {
+        let stack = vec![Place { page: Page::Home, focus: 0, scroll: 0.0 }];
         Self {
             stack,
             rules: Rules::default(),
             seed,
+            seed_title: String::new(),
             preset_name: "Standard".to_owned(),
             game_location: String::new(),
             can_copy_game: false,
@@ -581,6 +607,8 @@ impl Menu {
             seeds: Vec::new(),
             patch: PatchSummary::default(),
             looks: [0; 2],
+            qol: [0; 4],
+            qol_changed: false,
             player_name: "Player".to_owned(),
             ap_options: ApOptions::from_rules(&Rules::default().settings()),
             ap_changed: false,
@@ -719,6 +747,11 @@ impl Menu {
         self.open(Page::Patches);
     }
 
+    /// Sets the next seed's name. Empty text goes back to "Seed <number>".
+    pub fn set_seed_title(&mut self, name: &str) {
+        self.seed_title = crate::modmoon::clean_title(name);
+    }
+
     /// Sets the Archipelago player name, as cleaned for an options file.
     pub fn set_player_name(&mut self, name: &str) {
         self.player_name = crate::ap_yaml::clean_name(name);
@@ -787,6 +820,14 @@ impl Menu {
             2 => Some(false),
             _ => None,
         }
+    }
+
+    fn step_qol(&mut self, qol: Qol, delta: i32) {
+        let count = if matches!(qol, Qol::Timer | Qol::AlwaysLoad) { TIMER_CHOICES.len() } else { BUTTON_CHOICES.len() };
+        let choice = &mut self.qol[qol as usize];
+        *choice = (*choice as i32 + delta).rem_euclid(count as i32) as usize;
+        self.qol_changed = true;
+        self.value_changes += 1;
     }
 
     fn step_look(&mut self, look: Look, delta: i32) {
@@ -910,7 +951,7 @@ impl Menu {
         Row {
             label: option.label.to_owned(),
             value: Some(self.rules.value_text(option)),
-            help: option.help.to_owned(),
+            help: self.rules.help(option),
             target: Target::Option(index),
             icon: crate::icons::for_option(option.key),
         }
@@ -925,10 +966,6 @@ impl Menu {
             icon: None,
         };
         match self.page() {
-            Page::OldWarning => vec![
-                row("Continue", None, "", Target::Back),
-                row("Exit", None, "", Target::Exit),
-            ],
             Page::Home => {
                 let mut rows = Vec::new();
                 // Without the game files, nothing else works yet, so the page offers only the copy,
@@ -956,6 +993,12 @@ impl Menu {
                 row("Models and Voices", None, "Choose a player model and voice pack for this seed.", Target::Open(Page::Mods)),
                 row("Spoiler Logs", None, "Stuck? Look up where items are in seeds you made, and search by item or place.", Target::ListSpoilers),
                 row("Archipelago", None, "Play in a multiworld: send your options to the host, then patch your game from their file.", Target::Open(Page::Archipelago)),
+                row(
+                    "Speed and QoL",
+                    None,
+                    "A speedrun timer, and a logic map of your seed on ZL or ZR. These work when you start the game from this app.",
+                    Target::Open(Page::Qol),
+                ),
                 row("App Settings", None, "Settings for the app itself.", Target::Open(Page::AppSettings)),
                 row("About and Credits", None, "Who made this possible.", Target::Open(Page::About)),
                 row("Exit", None, "Close the app.", Target::Exit),
@@ -1006,6 +1049,12 @@ impl Menu {
             ],
             Page::Confirm => vec![
                 row("Seed Number", Some(self.seed.to_string()), "The same number and rules make the same game on this console. Press A to type one.", Target::EditSeed),
+                row(
+                    "Seed Name",
+                    Some(if self.seed_title.is_empty() { format!("Seed {}", self.seed) } else { self.seed_title.clone() }),
+                    "The name Your Seeds and ModMoon show for this seed. Press A to type one.",
+                    Target::EditSeedName,
+                ),
                 row("New Random Seed", None, "Picks a new seed number.", Target::RandomSeed),
                 row(START_RANDOMIZING, None, "Builds the game. Keep the console plugged in.", Target::Generate),
             ],
@@ -1083,6 +1132,31 @@ impl Menu {
                     ),
                 };
                 vec![row("Switch Seeds With", Some(value.to_owned()), help, target)]
+            }
+            Page::Qol => {
+                let button_help = "What the button does in the game. On an Old 3DS, hold SELECT and press L for ZL or R for ZR. Logic Map opens a map of the seed's checks: green ones are in logic, red ones need more items, grey ones are done. Press again for the other world, then again to close it. The game keeps running while it is open. Timer pauses or starts the timer, and holding it for two seconds resets it.";
+                vec![
+                    row(
+                        "Start the Game",
+                        None,
+                        "Starts A Link Between Worlds with these choices. Unless Load Every Time is on, start it from here each time you want them, as the HOME Menu and ModMoon start it without them. Archipelago games also get the connection the Archipelago client uses, so no other plugin is needed.",
+                        Target::PlayQol,
+                    ),
+                    row(
+                        "Speedrun Timer",
+                        Some(TIMER_CHOICES[self.qol[0]].to_owned()),
+                        "Shows a timer in the top left corner of the top screen. It leaves out loading screens: time stops whenever the game stops showing new frames.",
+                        Target::Qol(Qol::Timer),
+                    ),
+                    row("ZL Button", Some(BUTTON_CHOICES[self.qol[1]].to_owned()), button_help, Target::Qol(Qol::Zl)),
+                    row("ZR Button", Some(BUTTON_CHOICES[self.qol[2]].to_owned()), button_help, Target::Qol(Qol::Zr)),
+                    row(
+                        "Load Every Time",
+                        Some(TIMER_CHOICES[self.qol[3]].to_owned()),
+                        "On: Luma loads the plugin whenever the game starts, from the HOME Menu or ModMoon too, as long as Luma's plugin loader is on (Rosalina menu, L+Down+SELECT). It does nothing in games that are not this app's seeds or Archipelago patches. A plugin already in Luma's folder for the game is kept aside and put back when this is turned off.",
+                        Target::Qol(Qol::AlwaysLoad),
+                    ),
+                ]
             }
             Page::Seeds => {
                 let none_active = !self.seeds.iter().any(|seed| seed.active);
@@ -1191,6 +1265,7 @@ impl Menu {
                 }
             }
             Target::EditSeed => Action::EditSeed,
+            Target::EditSeedName => Action::EditSeedName,
             Target::RandomSeed => Action::RandomSeed,
             Target::Generate => Action::Generate,
             Target::Back => self.back(),
@@ -1226,6 +1301,11 @@ impl Menu {
                 self.step_look(look, 1);
                 Action::None
             }
+            Target::Qol(qol) => {
+                self.step_qol(qol, 1);
+                Action::None
+            }
+            Target::PlayQol => Action::PlayQol,
             Target::ApplyPatch => Action::PatchArchipelago(self.patch.file.clone()),
             Target::SpoilerItem(item) => {
                 self.back();
@@ -1413,6 +1493,11 @@ impl Menu {
                         self.step_look(look, delta);
                         Action::None
                     }
+                    Target::Qol(qol) => {
+                        let delta = if (VALUE_LEFT..VALUE_CENTER).contains(&x) { -1 } else { 1 };
+                        self.step_qol(qol, delta);
+                        Action::None
+                    }
                     target => self.activate(target),
                 }
             }
@@ -1497,6 +1582,14 @@ impl Menu {
                 self.ap_step(option, 1);
             }
         }
+        if let Some(Target::Qol(qol)) = focused {
+            if Self::repeats(pressed.left, held.left, frames) {
+                self.step_qol(qol, -1);
+            }
+            if Self::repeats(pressed.right, held.right, frames) {
+                self.step_qol(qol, 1);
+            }
+        }
         if let Some(Target::Look(look)) = focused {
             if Self::repeats(pressed.left, held.left, frames) {
                 self.step_look(look, -1);
@@ -1551,9 +1644,6 @@ impl Menu {
             }
         }
         if pressed.b {
-            if self.page() == Page::OldWarning {
-                return Action::Exit;
-            }
             if self.page() == Page::AskSeedSwitcher {
                 return Action::None;
             }
@@ -1566,7 +1656,7 @@ impl Menu {
         if pressed.y && self.page() == Page::Mods {
             return Action::PlayVoice;
         }
-        let question = matches!(self.page(), Page::OldWarning | Page::AskSeedSwitcher | Page::Confirm);
+        let question = matches!(self.page(), Page::AskSeedSwitcher | Page::Confirm);
         if pressed.start && self.has_game && !question {
             self.open(Page::Confirm);
         }
@@ -1590,7 +1680,7 @@ impl Menu {
                 label: row.label.clone(),
                 value: row.value.clone(),
                 focused: index == focus,
-                adjustable: matches!(row.target, Target::Option(_) | Target::ApOption(_) | Target::Mod(_) | Target::Look(_)),
+                adjustable: matches!(row.target, Target::Option(_) | Target::ApOption(_) | Target::Mod(_) | Target::Look(_) | Target::Qol(_)),
                 icon: row.icon,
                 pills: self.pills_of(row),
                 top: tops[index] - place.scroll,
@@ -1599,14 +1689,6 @@ impl Menu {
             .collect();
 
         let (title, subtitle, body, hint): (String, String, Vec<String>, &str) = match place.page {
-            Page::OldWarning => (
-                "Old 3DS Notice".to_owned(),
-                "This console may not finish".to_owned(),
-                paragraph(&format!(
-                        "Building a seed takes much longer on an Old 3DS, so keep it plugged in. The Standard preset has been tested here, but other rules may need more memory. If the app crashes, make your seed on a computer. Follow the instructions at {COMPUTER_INSTRUCTIONS}"
-                    )),
-                "A Select   B Exit",
-            ),
             Page::Home => {
                 let mut lines = paragraph(&self.game_location);
                 lines.push(String::new());
@@ -1693,6 +1775,7 @@ impl Menu {
                 "A Select",
             ),
             Page::AppSettings => ("App Settings".to_owned(), String::new(), paragraph(help), "A Change   B Back"),
+            Page::Qol => ("Speed and QoL".to_owned(), "Old 3DS: SELECT+L and SELECT+R".to_owned(), paragraph(help), "A Select   Left/Right Change   B Back"),
             Page::Seeds => ("Your Seeds".to_owned(), "The game plays the active one".to_owned(), paragraph(help), "A Use   B Back"),
             Page::Patch => {
                 let mut lines = vec![
@@ -1762,7 +1845,7 @@ mod tests {
     use crate::presets;
 
     fn menu() -> Menu {
-        Menu::new(1234, presets::built_in(), false)
+        Menu::new(1234, presets::built_in())
     }
 
     fn press(menu: &mut Menu, set: impl Fn(&mut Buttons)) -> Action {
@@ -1792,7 +1875,7 @@ mod tests {
 
     #[test]
     fn mods_cycle_through_original_and_each_name() {
-        let mut menu = Menu::new(1, Vec::new(), false);
+        let mut menu = Menu::new(1, Vec::new());
         menu.set_mods(vec!["Wolf".to_owned(), "Deity".to_owned()], Vec::new());
         assert_eq!(menu.model(), None);
         menu.mod_choice(ModKind::Model).step(1);
@@ -1825,8 +1908,8 @@ mod tests {
     #[test]
     fn long_lists_scroll_to_keep_focus_visible() {
         let mut menu = menu();
-        // Exit is the ninth Home row, below the screen until the list scrolls.
-        for _ in 0..8 {
+        // Exit is the tenth Home row, below the screen until the list scrolls.
+        for _ in 0..9 {
             press(&mut menu, |b| b.down = true);
             release(&mut menu);
         }
@@ -2016,7 +2099,7 @@ mod tests {
         let menu = menu();
         let mut total = 0;
         for category in 0..CATEGORIES.len() {
-            let mut menu_page = Menu::new(1, Vec::new(), false);
+            let mut menu_page = Menu::new(1, Vec::new());
             menu_page.open(Page::Options(category));
             total += menu_page.rows().len();
         }
@@ -2135,18 +2218,44 @@ mod tests {
         release(&mut menu);
         press(&mut menu, |b| b.up = true);
         release(&mut menu);
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::EditSeedName);
+        release(&mut menu);
+        press(&mut menu, |b| b.up = true);
+        release(&mut menu);
         assert_eq!(press(&mut menu, |b| b.a = true), Action::EditSeed);
     }
 
     #[test]
-    fn old_console_warns_first_and_can_continue_or_exit() {
-        let mut menu = Menu::new(1, Vec::new(), true);
-        assert_eq!(menu.page(), Page::OldWarning);
-        assert!(menu.view().body.join(" ").contains("z17-randomizer"));
-        assert_eq!(press(&mut menu, |b| b.b = true), Action::Exit);
+    fn qol_page_changes_choices_and_starts_the_game() {
+        let mut menu = Menu::new(1, Vec::new());
+        menu.open(Page::Qol);
+        assert_eq!(press(&mut menu, |b| b.a = true), Action::PlayQol);
         release(&mut menu);
-        press(&mut menu, |b| b.a = true);
-        assert_eq!(menu.page(), Page::Home);
+        press(&mut menu, |b| b.down = true);
+        release(&mut menu);
+        press(&mut menu, |b| b.right = true);
+        release(&mut menu);
+        assert_eq!(menu.qol, [1, 0, 0, 0]);
+        press(&mut menu, |b| b.down = true);
+        release(&mut menu);
+        press(&mut menu, |b| b.left = true);
+        release(&mut menu);
+        assert_eq!(menu.qol, [1, BUTTON_CHOICES.len() - 1, 0, 0]);
+        assert!(menu.qol_changed);
+        let shown: Vec<_> = menu.view().rows.iter().map(|row| row.value.clone().unwrap_or_default()).collect();
+        assert_eq!(shown, ["", "On", "Timer", "Nothing", "Off"]);
+    }
+
+    #[test]
+    fn a_seed_name_shows_on_the_confirm_page() {
+        let mut menu = Menu::new(42, Vec::new());
+        menu.open(Page::Confirm);
+        let shown = |menu: &Menu| menu.view().rows.iter().find(|row| row.label == "Seed Name").and_then(|row| row.value.clone());
+        assert_eq!(shown(&menu).as_deref(), Some("Seed 42"));
+        menu.set_seed_title("  Sunday Race ");
+        assert_eq!(shown(&menu).as_deref(), Some("Sunday Race"));
+        menu.set_seed_title("");
+        assert_eq!(shown(&menu).as_deref(), Some("Seed 42"));
     }
 
     fn sample_spoiler() -> Spoiler {

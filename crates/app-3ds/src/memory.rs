@@ -18,6 +18,11 @@ pub fn usage() -> usize {
     CURRENT.load(Relaxed)
 }
 
+/// The largest block the pool can give now.
+pub fn largest_free() -> usize {
+    with_pool(|pool| pool.largest_free())
+}
+
 pub fn usage_mb() -> f32 {
     mb(usage())
 }

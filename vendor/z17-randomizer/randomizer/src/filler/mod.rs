@@ -195,7 +195,8 @@ fn preplace_items(
     place_static(check_map, progression, Item::RupeeGold10, "[PD] (2F) South Hidden Room");
     place_static(check_map, progression, Item::HeartPiece28, "Fortune's Choice");
 
-    // Kakariko Item Shop
+    // Kakariko Item Shop. Its stands keep their items: other items on them crashed a real 3DS when
+    // picked up (in a lookup by name that found nothing).
     place_static(check_map, progression, Item::ScootFruit01, "Kakariko Item Shop (1)");
     place_static(check_map, progression, Item::FoulFruit01, "Kakariko Item Shop (2)");
     place_static(check_map, progression, Item::Shield01, "Kakariko Item Shop (3)");

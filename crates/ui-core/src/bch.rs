@@ -300,13 +300,9 @@ fn attribute(file: &File, at: usize, kind: u64, count: usize) -> Result<([f32; 4
     Ok((values, size * count))
 }
 
-/// Reads the first model in a `.bch` file.
-pub fn parse(data: Vec<u8>) -> Result<Model> {
-    let (file, main) = relocate(data)?;
+/// Textures: each has GPU commands that give its address, size and format.
+fn read_textures(file: &File, main: usize, model: &mut Model) -> Result<()> {
     let header = |index: usize| file.at(main + index * 4);
-    let mut model = Model::default();
-
-    // Textures: each has GPU commands that give its address, size and format.
     let (textures_at, texture_count) = (header(9)?, header(10)?);
     for index in 0..texture_count {
         let entry = file.at(textures_at + index * 4)?;
@@ -321,6 +317,24 @@ pub fn parse(data: Vec<u8>) -> Result<Model> {
         let pixels = file.data.get(start..start + length).ok_or_else(|| format!("texture {name} runs past the file"))?.to_vec();
         model.textures.push(Texture { name, width, height, gpu_format, pixels });
     }
+    Ok(())
+}
+
+/// Reads only the textures in a `.bch` file, such as the game's map pictures.
+pub fn textures(data: Vec<u8>) -> Result<Vec<Texture>> {
+    let (file, main) = relocate(data)?;
+    let mut model = Model::default();
+    read_textures(&file, main, &mut model)?;
+    Ok(model.textures)
+}
+
+/// Reads the first model in a `.bch` file.
+pub fn parse(data: Vec<u8>) -> Result<Model> {
+    let (file, main) = relocate(data)?;
+    let header = |index: usize| file.at(main + index * 4);
+    let mut model = Model::default();
+    read_textures(&file, main, &mut model)?;
+
 
     if header(1)? == 0 {
         return Err("the file has no model".to_owned());

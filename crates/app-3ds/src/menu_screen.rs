@@ -124,9 +124,12 @@ fn note_once(line: &str) {
 pub fn draw(view: &View, icons: &Icons, top_art: Option<*mut c_void>, skin: &Skin, preview: Option<(&Preview, f32)>) {
     let sizes = Sizes::new();
     draw::frame(
-        || match top_art {
-            Some(art) => draw_top_art(view, art, sizes),
-            None => draw_top(view, sizes),
+        || {
+            match top_art {
+                Some(art) => draw_top_art(view, art, sizes),
+                None => draw_top(view, sizes),
+            }
+            draw::corners();
         },
         || {
             if let Some(background) = skin.background {

@@ -7,7 +7,7 @@
 - [Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases).
 - A decrypted, **North American** A Link Between Worlds `.3ds` ROM until 0.1.3 and `.cci` ROM since 0.1.4. Instructions for dumping your ROM can be found [here](https://wiki.hacks.guide/wiki/3DS:Dump_titles_and_game_cartridges). **Make sure to select "decrypt" when dumping.** Note: if you need a `.cci` ROM, you can rename a `.3ds` ROM and vice versa. These files are identical, only the extension is different. If you have a `.cia` ROM then use [makerom.exe packaged into ctrtool (warning please install makerom not ctrtool)](https://github.com/3DSGuy/Project_CTR/releases) or this [script](https://github.com/davFaithid/CIA-to-3DS-Rom-Converter/releases)
 - To play on emulator: [Azahar](https://azahar-emu.org/pages/download/)
-- To play on 3ds: [Luma3DS](https://3ds.hacks.guide/) and LittleCube's [plugin.3gx](https://github.com/LittleCube-hax/albw-ap-plugin/releases/latest)
+- To play on 3ds: [Luma3DS](https://3ds.hacks.guide/) and the ALBW Randomizer 3DS app, whose plugin connects the game to the client
 
 - **The game must be played with the language set to English.**
 
@@ -30,7 +30,7 @@
 	2. Turn `Enable game patching` on and make sure it **DOES** have an x next to it.
 	3. Press Start or choose `Save and exit`.
 5. Press L+DPadDown+Select to open the Rosalina menu, and make sure that `Plugin loader` is set to `[Enabled]`.
-6. Download [plugin.3gx](https://github.com/LittleCube-hax/albw-ap-plugin/releases/latest) and copy it to `/luma/plugins/00040000000EC300/` on your SD card.
+6. In the ALBW Randomizer 3DS app, open Speed and QoL and turn on Load Every Time, or start the game from that page each time. The app's plugin answers the client; no other plugin is needed. (It replaces LittleCube's albw-ap-plugin, which the app keeps aside if it finds it.)
 7. (Optional) If you want the patcher to automatically install the mod, run the Archipelago Launcher and select `Open host.yaml`. Under `albw_settings`, set `mod_path` to `"<path-to-your-sd-card>/luma/titles"`. If you are on Windows, make sure to replace all `\` with `/` in the path.
 
 ## Updating
@@ -65,8 +65,8 @@
 4. This will do two things. First, it will open the A Link Between Worlds client. Second, it will create a zip file with the same name and directory as the patch file. Unzip this file; it contains a folder named `00040000000EC300`.
 5. Copy the `00040000000EC300` folder to `/luma/titles/` on your SD card.
 6. Re-insert your SD card into your 3DS and power it on.
-7. Run A Link Between Worlds. At the end of the red 3DS loading screen, you should see a blue flash. This means the plugin has loaded successfully.
-8. Run the command on-screen into your ALBW client.
+7. Run A Link Between Worlds. A command such as `/3ds 192.168.1.20` shows in the top left corner of the top screen until the client connects.
+8. Run that command in your ALBW client.
 9. Enter the server URL into the client and press Connect.
 
 ## Resuming a Game
