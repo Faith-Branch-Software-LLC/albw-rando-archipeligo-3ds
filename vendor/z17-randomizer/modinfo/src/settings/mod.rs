@@ -6,6 +6,7 @@ pub use crate::settings::logic::LogicMode;
 pub use crate::settings::nice_items::NiceItems;
 pub use crate::settings::pedestal::PedestalSetting;
 pub use crate::settings::ravios_shop::RaviosShop;
+pub use crate::settings::shop_prices::ShopPrices;
 pub use crate::settings::super_items::SuperItems;
 pub use crate::settings::trials_door::TrialsDoor;
 pub use crate::settings::weather_vanes::WeatherVanes;
@@ -26,6 +27,7 @@ pub mod nice_items;
 pub mod super_items;
 pub mod pedestal;
 pub mod ravios_shop;
+pub mod shop_prices;
 pub mod trials_door;
 pub mod weather_vanes;
 
@@ -168,6 +170,11 @@ pub struct Settings {
     #[serde(default)]
     #[cfg_attr(feature = "python", pyo3(get, set))]
     pub boots_in_shop: bool,
+
+    /// What the shops charge. Random gives each shop slot its own price.
+    #[serde(default)]
+    #[cfg_attr(feature = "python", pyo3(get, set))]
+    pub shop_prices: ShopPrices,
 
     /// Guarantees a Weapon is placed in Ravio's Shop.
     /// Not available if [`boots_in_shop`] or [`sword_in_shop`] are enabled as they already are weapons.

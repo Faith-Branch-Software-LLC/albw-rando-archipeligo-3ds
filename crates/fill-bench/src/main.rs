@@ -156,10 +156,11 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
     randomizer::progress::set_hook(|phase, done, total| {
         if done == 0 {
             println!(
-                "  {:6.2} s  now {:6.1} MB  peak {:6.1} MB  {phase} ({total})",
+                "  {:6.2} s  now {:6.1} MB  peak {:6.1} MB  {phase} ({total})  {}",
                 STARTED.get().map_or(0.0, |t| t.elapsed().as_secs_f32()),
                 CURRENT.load(Relaxed) as f32 / (1024.0 * 1024.0),
-                peak_mb()
+                peak_mb(),
+                rom::spill::io::report()
             );
         }
     });
@@ -170,7 +171,8 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
             dir: Path::new(output).join("spill-tmp"),
             limit: budget_mb * 1024 * 1024,
             usage: || CURRENT.load(Relaxed),
-            clear_before_compress: budget_mb < 30,
+            // CLEAR=0 or 1 overrides whether every archive leaves memory before compressing.
+            clear_before_compress: std::env::var("CLEAR").map_or(budget_mb < 30, |clear| clear == "1"),
             largest_free: Some(|| POOL.lock().unwrap().largest_free()),
             headroom: std::env::var("HEADROOM_MB").ok().and_then(|mb| mb.parse().ok()).unwrap_or(9) * 1024 * 1024,
         });
@@ -183,6 +185,7 @@ fn patch(rom_path: &str, output: &str, budget_mb: Option<usize>) {
         println!("mod {}: {report:?}", source.display());
     }
     println!("patch: {:.2} s, overall peak {:.1} MB, {stats:?}", start.elapsed().as_secs_f32(), peak_mb());
+    println!("io: {}", rom::spill::io::report());
     println!(
         "pool peak {:.1} MB, small peak {:.1} MB",
         POOL.lock().unwrap().peak() as f32 / (1024.0 * 1024.0),
@@ -217,7 +220,25 @@ fn fill_only() {
     }
 }
 
+/// Prints the randomizer's log lines that match LOG, such as LOG="True item models".
+struct Printer;
+impl log::Log for Printer {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        let text = record.args().to_string();
+        if std::env::var("LOG").is_ok_and(|wanted| text.contains(&wanted)) {
+            println!("log: {text}");
+        }
+    }
+    fn flush(&self) {}
+}
+
 fn main() {
+    if std::env::var_os("LOG").is_some() {
+        let _ = log::set_logger(&Printer).map(|()| log::set_max_level(log::LevelFilter::Info));
+    }
     // POOL_MB sets a console-sized pool, such as 30.7 for an Old 3DS.
     let pool_bytes = std::env::var("POOL_MB")
         .ok()
@@ -258,6 +279,14 @@ fn main() {
                     Err(_) => println!("not found: {file}"),
                 }
             }
+        }
+        [command, rom_path, course, stage] if command == "stage" => {
+            // Prints one scene's stage file as JSON. COURSE is a name like IndoorLight, and STAGE
+            // counts from 0.
+            let game = rom::Rom::load(rom_path).expect("load ROM");
+            let course = game::Course::iter().find(|c| c.as_str() == course).expect("course name");
+            let stage = game.stage(course, stage.parse().expect("stage number")).expect("stage");
+            println!("{}", serde_json::to_string(&stage).unwrap());
         }
         [command, path] if command == "byaml" => {
             let data = std::fs::read(path).expect("read");

@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "app-3ds"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "ap-patch",
  "block-pool",
@@ -278,6 +278,8 @@ name = "fill-bench"
 version = "0.1.0"
 dependencies = [
  "block-pool",
+ "game",
+ "log",
  "modinfo",
  "randomizer",
  "rom",

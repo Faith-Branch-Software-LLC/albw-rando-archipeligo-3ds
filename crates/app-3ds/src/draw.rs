@@ -336,24 +336,42 @@ pub fn triforce(center_x: f32, top: f32, side: f32, color: u32) {
 }
 
 /// The app version and the memory the console gave the app, shown in the top screen's lower
-/// corners. A New 3DS sometimes starts the app with only Old 3DS memory, and seeds can then run
-/// out of memory, so the player can see it and restart the app from the HOME Menu.
+/// corners for a few seconds after the app opens. A New 3DS sometimes starts the app with only Old
+/// 3DS memory, so the player can see it and restart the app from the HOME Menu.
 struct Corners {
     version: String,
     memory: String,
     low: bool,
+    shown_at: u64,
 }
 
 static CORNERS: std::sync::OnceLock<Corners> = std::sync::OnceLock::new();
 
+/// How long the labels stay, and how long they then take to fade, in milliseconds.
+const CORNERS_SHOWN_MS: u64 = 10_000;
+const CORNERS_FADE_MS: u64 = 1_000;
+
 /// Sets the corner labels once at startup. `low` colors the memory label as a warning.
 pub fn set_corners(memory: String, low: bool) {
-    let _ = CORNERS.set(Corners { version: format!("v{}", env!("CARGO_PKG_VERSION")), memory, low });
+    // SAFETY: Reads the system clock only.
+    let shown_at = unsafe { ctru_sys::osGetTime() };
+    let _ = CORNERS.set(Corners { version: format!("v{}", env!("CARGO_PKG_VERSION")), memory, low, shown_at });
 }
 
-/// Draws the corner labels on the top screen.
+/// Draws the corner labels on the top screen until they have faded out.
 pub fn corners() {
     let Some(corners) = CORNERS.get() else { return };
+    // SAFETY: Reads the system clock only.
+    let age = unsafe { ctru_sys::osGetTime() }.saturating_sub(corners.shown_at);
+    if age >= CORNERS_SHOWN_MS + CORNERS_FADE_MS {
+        return;
+    }
+    let fade = age.saturating_sub(CORNERS_SHOWN_MS) as f32 / CORNERS_FADE_MS as f32;
+    let opacity = 1.0 - fade;
+    let with_opacity = |color: u32| {
+        let alpha = ((color >> 24) as f32 * opacity) as u32;
+        (color & 0x00FF_FFFF) | (alpha << 24)
+    };
     const SCALE: f32 = 0.45;
     let height = line_height(SCALE);
     let y = 240.0 - height - 2.0;
@@ -361,11 +379,11 @@ pub fn corners() {
     let plate = |content: &str, left: f32| {
         let width = text_width(Font::Body, content, SCALE) + 8.0;
         let left = if left < 200.0 { left } else { left - width };
-        rounded_rect(left, y - 1.0, width, height + 2.0, 4.0, rgba(0x0C, 0x12, 0x22, 200));
+        rounded_rect(left, y - 1.0, width, height + 2.0, 4.0, with_opacity(rgba(0x0C, 0x12, 0x22, 200)));
         left + 4.0
     };
     let x = plate(&corners.version, 2.0);
-    text(&corners.version, x, y, SCALE, WHITE, LEFT);
+    text(&corners.version, x, y, SCALE, with_opacity(WHITE), LEFT);
     let x = plate(&corners.memory, 398.0);
-    text(&corners.memory, x, y, SCALE, if corners.low { RED } else { WHITE }, LEFT);
+    text(&corners.memory, x, y, SCALE, with_opacity(if corners.low { RED } else { WHITE }), LEFT);
 }

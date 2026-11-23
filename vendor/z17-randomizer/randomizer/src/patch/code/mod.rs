@@ -216,7 +216,7 @@ pub fn create(patcher: &Patcher, seed_info: &SeedInfo) -> Code {
     if seed_info.is_archipelago() && seed_info.settings.shuffle_maiamai_rewards {
         archipelago_mother_maiamai(&mut code, &seed_info.mother_maiamai_costs);
     }
-    if seed_info.settings.change_freestanding_models {
+    if crate::true_item_models(&seed_info.settings) {
         item_models(&mut code, &seed_info.layout, &actor_names, &patcher.true_models);
     }
     pause_menu_warp(&mut code);

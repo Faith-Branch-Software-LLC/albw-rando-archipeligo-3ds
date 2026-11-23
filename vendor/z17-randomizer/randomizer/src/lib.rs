@@ -46,6 +46,16 @@ pub mod filler;
 pub mod progress;
 pub mod hints;
 mod metrics;
+pub mod shop_prices;
+
+/// Whether loose items may show the model of the item they hold. Off for now: the extra models
+/// crashed the game on a New 3DS in too many seeds, so `change_freestanding_models` is ignored.
+pub const TRUE_ITEM_MODELS: bool = false;
+
+/// Whether this seed's loose items show their item's model.
+pub fn true_item_models(settings: &modinfo::Settings) -> bool {
+    TRUE_ITEM_MODELS && settings.change_freestanding_models
+}
 mod patch;
 pub mod regions;
 pub mod system;
@@ -461,6 +471,10 @@ pub struct SeedInfo {
 
     #[serde(skip_deserializing)]
     pub mother_maiamai_costs: Vec<u8>,
+
+    /// Each shop slot's price by location name, when shop prices are random.
+    #[serde(skip_deserializing, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shop_prices: BTreeMap<String, u16>,
 }
 
 impl SeedInfo {
@@ -517,6 +531,7 @@ impl Default for SeedInfo {
             treacherous_tower_floors: Default::default(),
             text: Default::default(),
             mother_maiamai_costs: Default::default(),
+            shop_prices: Default::default(),
         }
     }
 }
@@ -714,6 +729,7 @@ fn calculate_seed_info(seed: u32, settings: Settings, hash: SeedHash, rng: &mut 
     let treacherous_tower_floors = treacherous_tower::choose_floors(&settings, rng)?;
     let world_graph = world::build_world_graph(&crack_map);
     let mother_maiamai_costs = mother_maiamai::choose_mother_maiamai_costs(&settings, rng);
+    let shop_prices = shop_prices::choose(seed, settings.shop_prices);
 
     let mut seed_info = SeedInfo {
         seed,
@@ -732,6 +748,7 @@ fn calculate_seed_info(seed: u32, settings: Settings, hash: SeedHash, rng: &mut 
         text,
         treacherous_tower_floors,
         mother_maiamai_costs,
+        shop_prices,
     };
 
     // Check Map and Item Pools
@@ -760,6 +777,7 @@ pub fn randomize_pre_fill(seed: u32, settings: Settings, archipelago_info: Optio
     let treacherous_tower_floors = treacherous_tower::choose_floors(&settings, rng).unwrap();
     let world_graph = world::build_world_graph(&crack_map);
     let mother_maiamai_costs = mother_maiamai::choose_mother_maiamai_costs(&settings, rng);
+    let shop_prices = shop_prices::choose(seed, settings.shop_prices);
 
     SeedInfo {
         seed,
@@ -778,6 +796,7 @@ pub fn randomize_pre_fill(seed: u32, settings: Settings, archipelago_info: Optio
         text,
         treacherous_tower_floors,
         mother_maiamai_costs,
+        shop_prices,
     }
 }
 

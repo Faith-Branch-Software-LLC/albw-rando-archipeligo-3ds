@@ -131,7 +131,8 @@ where
             }
         }
         let bytes = self.inner.into_bytes();
-        fs::write(path, bytes)?;
+        let size = bytes.len();
+        crate::spill::io::timed(crate::spill::io::Kind::Output, || (fs::write(path, bytes), size))?;
         Ok(())
     }
 }

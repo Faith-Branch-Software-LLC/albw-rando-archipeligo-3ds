@@ -10,4 +10,6 @@ block-pool = { path = "../block-pool" }
 modinfo = { path = "../../vendor/z17-randomizer/modinfo" }
 randomizer = { path = "../../vendor/z17-randomizer/randomizer", default-features = false }
 rom = { path = "../../vendor/z17-randomizer/rom" }
+game = { path = "../../vendor/z17-randomizer/game" }
 serde_json = "1"
+log = "0.4"

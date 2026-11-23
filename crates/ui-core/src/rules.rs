@@ -37,7 +37,7 @@ const fn option(key: &'static str, label: &'static str, category: usize, kind: K
 }
 
 /// Settings with no menu entry. A test checks that every other field is in `OPTIONS`.
-pub const HIDDEN: [&str; 5] = [
+pub const HIDDEN: [&str; 6] = [
     "dev_mode",
     // The randomizer rejects a value that differs from `lc_requirement`, so it follows that option.
     "yuganon_requirement",
@@ -46,6 +46,9 @@ pub const HIDDEN: [&str; 5] = [
     "progressive_bow_of_light",
     // Needs a list screen of about 300 locations. Preset files can still set it.
     "user_exclusions",
+    // True item models crashed the game on a New 3DS in too many seeds, so the patcher ignores
+    // this setting and the menu leaves it out.
+    "change_freestanding_models",
 ];
 
 pub const OPTIONS: &[OptionDef] = &[
@@ -75,12 +78,12 @@ pub const OPTIONS: &[OptionDef] = &[
     option("sword_in_shop", "Sword in Shop", 3, Kind::Toggle, "Ravio's Shop sells a Sword. Turns off Swordless and Assured Weapon."),
     option("boots_in_shop", "Boots in Shop", 3, Kind::Toggle, "Ravio's Shop sells the Pegasus Boots. Turns off Assured Weapon."),
     option("assured_weapon", "Assured Weapon", 3, Kind::Toggle, "Ravio's Shop is sure to sell a weapon. Turns off Sword and Boots in Shop."),
+    option("shop_prices", "Shop Prices", 3, Kind::Choice(&[("Vanilla", "Vanilla"), ("Random", "Random")]), "What Ravio, the Street Merchant, and the item shops charge."),
     option("minigames_excluded", "Exclude Minigames", 4, Kind::Toggle, "Cucco Ranch, Rupee Rush, Treacherous Tower, Octoball Derby, and Hyrule Hotfoot hold only junk."),
     option("skip_big_bomb_flower", "Skip Big Bomb Flower", 4, Kind::Toggle, "Removes the 5 Big Rocks in Lorule Field."),
     option("treacherous_tower_floors", "Treacherous Floors", 4, Kind::Number { min: 2, max: 66, step: 1 }, "How many floors Treacherous Tower has."),
     option("hint_ghosts", "Hint Ghosts", 5, Kind::Choice(&[("Off", "Off"), ("Always", "Always"), ("Glasses", "With Glasses")]), "When Hint Ghosts can be seen."),
     option("chest_size_matches_contents", "Chest Size Hints", 5, Kind::Toggle, "Large chests hold progression or unique items, and small chests hold the rest."),
-    option("change_freestanding_models", "True Item Models", 5, Kind::Toggle, "Loose Heart Pieces, Heart Containers, small keys and a rupee look like the item they hold. The game has room for only so many models, so in a few seeds some keep their usual look."),
     option("purple_potion_bottles", "Purple Potion Bottles", 5, Kind::Toggle, "Fills every empty Bottle with a free Purple Potion."),
     option("night_mode", "Night Mode", 5, Kind::Toggle, "Experimental. Hyrule uses night colors until you visit Lorule."),
 ];
@@ -127,6 +130,8 @@ pub const CHOICE_HELP: &[(&str, &str, &str)] = &[
     ("keysy", "SmallKeysy", "Small Keys and their locked doors are removed from every dungeon."),
     ("keysy", "BigKeysy", "Big Keys and their big doors are removed from every dungeon."),
     ("keysy", "AllKeysy", "Every key and locked door is removed from every dungeon."),
+    ("shop_prices", "Vanilla", "Every shop charges its normal price."),
+    ("shop_prices", "Random", "Every shop slot costs 10 to 300 Rupees. The seed may expect you to gather Rupees for a slot."),
     ("hint_ghosts", "Off", "Hint Ghosts never appear."),
     ("hint_ghosts", "Always", "Hint Ghosts can always be seen."),
     ("hint_ghosts", "Glasses", "Hint Ghosts appear once you have the Hint Glasses."),

@@ -280,6 +280,14 @@ impl Archive {
 
     /// Reads back what `write_spill` wrote, one file at a time, and deletes the spill file.
     fn load_spill(path: &std::path::PathBuf) -> std::io::Result<Self> {
+        spill::io::timed(spill::io::Kind::Spill, || {
+            let archive = Self::read_spill(path);
+            let size = archive.as_ref().map_or(0, |archive| archive.files.values().map(Vec::len).sum());
+            (archive, size)
+        })
+    }
+
+    fn read_spill(path: &std::path::PathBuf) -> std::io::Result<Self> {
         use std::io::Read;
         fn word(input: &mut impl Read) -> std::io::Result<u32> {
             let mut bytes = [0; 4];

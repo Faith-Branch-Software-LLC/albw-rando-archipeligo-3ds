@@ -20,6 +20,8 @@
 #define GAME_LOCATION 0x709df8
 
 #define COURSE_COUNT 24
+// Hyrule Castle's course, which holds the crack open from the start.
+#define COURSE_CASTLE 0x0C
 #define COURSE_FLAG_BYTES 0x30
 #define EVENT_FLAG_BYTES 0x80
 
@@ -33,10 +35,21 @@ static u8 *checked, *status, *usedCracks;
 static bool hasState;
 static int shownWorld;
 static u64 refreshedAt;
+// Whether the cracks between the worlds are open: event flag 510, which Quake sets, and which
+// seeds with open cracks start with.
+static bool cracksOpen;
+#define CRACKS_OPEN_FLAG 510
 static u8 lastCourse = 0xFF;
 static u32 lastStage;
 
 static const char *const WORLD_NAMES[] = {"HYRULE", "LORULE"};
+// The name of the button that opens the map, for the hints.
+static const char *mapButton = "ZL";
+
+void map_set_button(const char *name)
+{
+    mapButton = name;
+}
 
 // The game's own map of each world, made by the app from the player's game files.
 // The large ones are for the zoomed-in view.
@@ -49,18 +62,6 @@ static const struct
     {{"sdmc:/3ds/albw-rando/qol/map-lorule.bin", 232}, {"sdmc:/3ds/albw-rando/qol/map-lorule-large.bin", 464}},
 };
 static u8 *pictures[2][2];
-
-// Dungeons by the tag their checks' names start with, for the list on the top screen.
-static const struct
-{
-    const char *tag, *name;
-} DUNGEONS[] = {
-    {"[EP]", "Eastern Palace"}, {"[HG]", "House of Gales"}, {"[TH]", "Tower of Hera"},  {"[HC]", "Hyrule Castle"},
-    {"[PD]", "Dark Palace"},    {"[SP]", "Swamp Palace"},   {"[SW]", "Skull Woods"},    {"[TT]", "Thieves' Hideout"},
-    {"[IR]", "Ice Ruins"},      {"[DP]", "Desert Palace"},  {"[TR]", "Turtle Rock"},    {"[LC]", "Lorule Castle"},
-};
-#define DUNGEON_COUNT (sizeof(DUNGEONS) / sizeof(DUNGEONS[0]))
-static int dungeonCounts[DUNGEON_COUNT][4]; // by status: out of logic, in logic, checked, glitched
 
 // Dungeons on each map, at their icon on the game's map, in map units.
 static const struct
@@ -160,6 +161,7 @@ static bool readChecks(void)
         }
     }
 #define FLAG_SET(bytes, flag) ((flag) / 8 < sizeof(bytes) && ((bytes)[(flag) / 8] & (1 << ((flag) & 7))))
+    cracksOpen = FLAG_SET(events, CRACKS_OPEN_FLAG);
     for (u32 i = 0; i < map.checkCount; i++)
     {
         MapCheck check = map_check(&map, i);
@@ -371,8 +373,7 @@ static void drawSelection(const Canvas *c)
     const int lines = count > 18 ? 18 : count, height = lines * 10 + 6;
     // The box goes on the half of the map away from the place, so the dot stays in view.
     int top = screenY(selectedY) < MAP_TOP + MAP_SIZE / 2 ? MAP_TOP + MAP_SIZE - height : MAP_TOP;
-    canvas_fill(c, MAP_LEFT, top, MAP_SIZE, height, 0x000000);
-    canvas_fill(c, MAP_LEFT + 1, top + 1, MAP_SIZE - 2, height - 2, 0x101828);
+    canvas_box(c, MAP_LEFT + 1, top + 1, MAP_SIZE - 2, height - 2, 5, 0x101828, 200);
     int x = screenX(selectedX), y = screenY(selectedY);
     canvas_fill(c, x - 4, y - 4, 9, 1, 0xFFFFFF);
     canvas_fill(c, x - 4, y + 4, 9, 1, 0xFFFFFF);
@@ -435,18 +436,8 @@ static void compose(void)
             canvas_text(c, screenX(LABELS[i].x) - 8, screenY(LABELS[i].y) + 5, LABELS[i].label, 0x8090A8);
 
     int totalIn = 0, totalOut = 0, totalDone = 0, totalGlitched = 0;
-    memset(dungeonCounts, 0, sizeof(dungeonCounts));
     if (loaded && hasState)
     {
-        for (u32 i = 0; i < map.checkCount; i++)
-        {
-            MapCheck check = map_check(&map, i);
-            if (check.kind != KIND_ITEM)
-                continue;
-            for (unsigned d = 0; d < DUNGEON_COUNT; d++)
-                if (!strncmp(check.name, DUNGEONS[d].tag, 4))
-                    dungeonCounts[d][status[i]]++;
-        }
         for (u32 i = 0; i < map.checkCount; i++)
         {
             MapCheck check = map_check(&map, i);
@@ -481,16 +472,30 @@ static void compose(void)
             }
             int x = screenX(check.x), y = screenY(check.y);
             u32 color = statusColor(in, glitched, out);
+            // Zoomed in, markers grow so they are easier to tap.
             if (in + out + done + glitched > 1)
             {
-                canvas_fill(c, x - 3, y - 3, 7, 7, 0x000000);
-                canvas_fill(c, x - 2, y - 2, 5, 5, color);
+                if (zoom > 1)
+                {
+                    canvas_disc(c, x, y, 7, 0x000000);
+                    canvas_disc(c, x, y, 5, color);
+                }
+                else
+                {
+                    canvas_fill(c, x - 3, y - 3, 7, 7, 0x000000);
+                    canvas_fill(c, x - 2, y - 2, 5, 5, color);
+                }
                 if (in)
                 {
                     char count[4];
                     snprintf(count, sizeof(count), "%d", in > 99 ? 99 : in);
-                    canvas_text(c, x + 4, y - 4, count, 0xFFFFFF);
+                    canvas_text(c, x + (zoom > 1 ? 8 : 4), y - 4, count, 0xFFFFFF);
                 }
+            }
+            else if (zoom > 1)
+            {
+                canvas_disc(c, x, y, 5, 0x000000);
+                canvas_disc(c, x, y, 3, color);
             }
             else
             {
@@ -498,11 +503,14 @@ static void compose(void)
                 canvas_fill(c, x - 1, y - 1, 3, 3, color);
             }
         }
-        // Cracks: a purple mark, and once used, a line to where it leads.
+        // Cracks: a purple mark, and once used, a line to where it leads. They stay hidden until
+        // the cracks open, except Hyrule Castle's, which is open from the start.
         for (u32 i = 0; i < map.crackCount; i++)
         {
             MapCrack crack = map_crack(&map, i);
             if (crack.from.map != shownWorld)
+                continue;
+            if (!cracksOpen && crack.from.course != COURSE_CASTLE && crack.to.course != COURSE_CASTLE)
                 continue;
             int x = screenX(crack.from.x), y = screenY(crack.from.y);
             if (usedCracks[i])
@@ -511,8 +519,9 @@ static void compose(void)
                 line(x, y, screenX(crack.to.x), screenY(crack.to.y), color);
                 canvas_fill(c, screenX(crack.to.x) - 1, screenY(crack.to.y) - 1, 3, 3, color);
             }
-            canvas_fill(c, x - 1, y - 3, 3, 7, 0xA060E0);
-            canvas_fill(c, x - 3, y - 1, 7, 3, 0xA060E0);
+            int arm = zoom > 1 ? 5 : 3, thick = zoom > 1 ? 2 : 1;
+            canvas_fill(c, x - thick, y - arm, thick * 2 + 1, arm * 2 + 1, 0xA060E0);
+            canvas_fill(c, x - arm, y - thick, arm * 2 + 1, thick * 2 + 1, 0xA060E0);
         }
         drawSelection(c);
     }
@@ -523,8 +532,16 @@ static void compose(void)
     canvas_fill(c, MAP_LEFT + MAP_SIZE + 1, 0, 320, 240, 0x0C1420);
 
     // The zoom button.
-    canvas_fill(c, PANEL_LEFT - 2, ZOOM_TOP, 320 - PANEL_LEFT, ZOOM_HEIGHT, 0x24344A);
+    canvas_box(c, PANEL_LEFT - 2, ZOOM_TOP, 320 - PANEL_LEFT, ZOOM_HEIGHT, 6, 0x24344A, 255);
     canvas_text(c, PANEL_LEFT + 2, ZOOM_TOP + 7, zoom > 1 ? "Zoom out" : "Zoom in", 0xFFFFFF);
+    if (zoom > 1)
+    {
+        // The D-pad moves the zoomed view.
+        canvas_disc(c, PANEL_LEFT + 4, ZOOM_TOP - 9, 7, 0xFFEE9C);
+        canvas_fill(c, PANEL_LEFT + 3, ZOOM_TOP - 13, 3, 9, 0x1A1F2E);
+        canvas_fill(c, PANEL_LEFT, ZOOM_TOP - 10, 9, 3, 0x1A1F2E);
+        canvas_text(c, PANEL_LEFT + 14, ZOOM_TOP - 13, "move", 0x708098);
+    }
 
     int y = 6;
     canvas_text(c, PANEL_LEFT, y, WORLD_NAMES[shownWorld], 0xFFFFFF);
@@ -566,7 +583,7 @@ static void compose(void)
     canvas_text(c, PANEL_LEFT + 10, y, text, 0xFFFFFF);
     canvas_text(c, PANEL_LEFT + 10, y + 10, "checked", 0xA0A8B8);
     y += 26;
-    if (map.crackCount)
+    if (map.crackCount && cracksOpen)
     {
         canvas_fill(c, PANEL_LEFT + 2, y - 1, 3, 9, 0xA060E0);
         canvas_fill(c, PANEL_LEFT, y + 2, 7, 3, 0xA060E0);
@@ -577,12 +594,13 @@ static void compose(void)
         canvas_text(c, PANEL_LEFT + 10, y + 10, "world", 0xA0A8B8);
         y += 24;
     }
-    canvas_text(c, PANEL_LEFT, 208, "Hold:", 0x708098);
-    canvas_text(c, PANEL_LEFT, 218, shownWorld ? "Hyrule" : "Lorule", 0x708098);
-    canvas_text(c, PANEL_LEFT, 230, "Press:shut", 0x708098);
+    // What the map button does, with the button drawn as the console shows it.
+    int badge = canvas_badge(c, PANEL_LEFT, 204, mapButton);
+    canvas_text(c, PANEL_LEFT + badge + 3, 206, "hold:", 0x708098);
+    canvas_text(c, PANEL_LEFT + badge + 3, 216, shownWorld ? "Hyrule" : "Lorule", 0x708098);
+    badge = canvas_badge(c, PANEL_LEFT, 228, mapButton);
+    canvas_text(c, PANEL_LEFT + badge + 3, 230, "close", 0x708098);
 }
-
-static void buildPanel(void);
 
 void map_refresh(void)
 {
@@ -595,7 +613,6 @@ void map_refresh(void)
     if (hasState)
         map_evaluate(&map, checked, status);
     compose();
-    buildPanel();
 }
 
 void map_open(void)
@@ -621,8 +638,10 @@ void map_touch(int x, int y)
     }
     if (!loaded || !hasState)
         return;
-    // The nearest marker within reach of the tap, or none to hide the list.
-    int best = 8 * 8 + 1;
+    // The nearest marker within reach of the tap, or none to hide the list. Markers are larger
+    // when zoomed in, and so is their reach.
+    int reach = zoom > 1 ? 12 : 8;
+    int best = reach * reach + 1;
     bool found = false;
     for (u32 i = 0; i < map.checkCount; i++)
     {
@@ -645,67 +664,31 @@ void map_touch(int x, int y)
     compose();
 }
 
+bool map_player_present(void)
+{
+    // While a stage loads there is no player.
+    u32 player = readWord(0x70fb60);
+    return player && readWord(player + 0x10);
+}
+
+void map_pan(int x, int y, u64 now)
+{
+    static u64 movedAt;
+    const int step = 4; // map units each 50 ms
+    if (zoom == 1 || (x == 0 && y == 0) || now - movedAt < 268111ULL * 50)
+        return;
+    movedAt = now;
+    // Down on the map is a larger y.
+    int span = 256 / zoom;
+    centerView(viewX + span / 2 + x * step, viewY + span / 2 + y * step);
+    compose();
+}
+
 void map_switch_world(void)
 {
     selected = false;
     shownWorld = !shownWorld;
     compose();
-}
-
-// The dungeon list, drawn on the top screen while the map is open.
-#define PANEL_WIDTH 206
-#define PANEL_TOP 18
-#define PANEL_HEIGHT (16 + DUNGEON_COUNT * 11)
-
-static void drawDungeons(const Canvas *canvas)
-{
-    const int width = PANEL_WIDTH, left = canvas->width - width, top = PANEL_TOP;
-    canvas_fill(canvas, left, top, width, PANEL_HEIGHT, 0x0C1420);
-    canvas_text(canvas, left + 4, top + 4, "DUNGEONS", 0xFFFFFF);
-    canvas_text(canvas, left + 150, top + 4, "in", 0x48E048);
-    canvas_text(canvas, left + 174, top + 4, "out", 0xE04848);
-    for (unsigned d = 0; d < DUNGEON_COUNT; d++)
-    {
-        int y = top + 16 + d * 11;
-        int in = dungeonCounts[d][STATUS_IN_LOGIC], glitched = dungeonCounts[d][STATUS_GLITCHED];
-        int out = dungeonCounts[d][STATUS_OUT_OF_LOGIC] + glitched;
-        u32 color = statusColor(in, glitched, out);
-        canvas_fill(canvas, left + 4, y + 1, 6, 6, color);
-        char name[18];
-        snprintf(name, sizeof(name), "%.16s", DUNGEONS[d].name);
-        canvas_text(canvas, left + 14, y, name, in + out ? 0xFFFFFF : 0x7A7A7A);
-        if (!hasState)
-            continue;
-        char count[8];
-        snprintf(count, sizeof(count), "%2d", in);
-        canvas_text(canvas, left + 148, y, count, 0x48E048);
-        snprintf(count, sizeof(count), "%2d", out);
-        canvas_text(canvas, left + 178, y, count, 0xE04848);
-    }
-}
-
-// The dungeon list is drawn once into this picture, laid out like an RGB565 framebuffer, and
-// copied onto each new frame of the game; drawing its text every frame slowed the game.
-static u16 panel[PANEL_WIDTH * 240];
-
-static void buildPanel(void)
-{
-    const Canvas canvas = {(u8 *)panel, 480, 2, 2, PANEL_WIDTH};
-    drawDungeons(&canvas);
-}
-
-void map_draw_dungeons(const Canvas *canvas)
-{
-    if (canvas->format != 2 || canvas->bpp != 2 || canvas->stride != 480 || canvas->width < PANEL_WIDTH)
-    {
-        drawDungeons(canvas);
-        return;
-    }
-    // Rows top to bottom of the screen run backwards in memory.
-    u32 first = 239 - (PANEL_TOP + PANEL_HEIGHT - 1);
-    for (int x = 0; x < PANEL_WIDTH; x++)
-        memcpy(canvas->pixels + (canvas->width - PANEL_WIDTH + x) * 480 + first * 2, panel + x * 240 + first,
-               PANEL_HEIGHT * 2);
 }
 
 void map_tick(u64 now, bool open)
@@ -740,17 +723,6 @@ void map_draw(const Canvas *canvas)
 #ifdef PLUGIN_TEST
 void map_dump(const char *path)
 {
-    // The top screen's dungeon list, drawn on black.
-    static u16 top[400 * 240];
-    const Canvas topCanvas = {(u8 *)top, 480, 2, 2, 400};
-    canvas_fill(&topCanvas, 0, 0, 400, 240, 0);
-    map_draw_dungeons(&topCanvas);
-    FILE *topFile = fopen("sdmc:/3ds/albw-rando/test-dungeons.raw", "wb");
-    if (topFile)
-    {
-        fwrite(top, 1, sizeof(top), topFile);
-        fclose(topFile);
-    }
     FILE *file = fopen(path, "wb");
     if (file)
     {

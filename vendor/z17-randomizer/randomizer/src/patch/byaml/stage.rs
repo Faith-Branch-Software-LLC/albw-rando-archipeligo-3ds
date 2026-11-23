@@ -98,6 +98,8 @@ pub fn patch(patcher: &mut Patcher, seed_info: &SeedInfo) -> Result<()> {
 
     patch_flag_510_effects(patcher)?;
     patch_ravios_shop(patcher)?;
+    // After Ravio's own changes, which set some of the same prices.
+    patch_shop_prices(patcher, seed_info);
     patch_sahasrahlas_house(patcher)?;
     patch_maiamai_cave(patcher);
     patch_treacherous_tower(patcher, seed_info)?;
@@ -791,6 +793,22 @@ fn patch_flag_510_effects(patcher: &mut Patcher) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Gives each shop slot its random price.
+fn patch_shop_prices(patcher: &mut Patcher, seed_info: &SeedInfo) {
+    for stand in crate::shop_prices::STANDS {
+        let Some(&price) = seed_info.shop_prices.get(stand.name) else { continue };
+        let arg = stand.arg;
+        patcher.modify_objs(
+            stand.course,
+            stand.stage,
+            [call(stand.unq, move |obj| match arg {
+                crate::shop_prices::PriceArg::Fourth => obj.arg.3 = price as i32,
+                crate::shop_prices::PriceArg::Third => obj.arg.2 = price as i32,
+            })],
+        );
+    }
 }
 
 fn patch_ravios_shop(patcher: &mut Patcher) -> Result<()> {
@@ -2133,7 +2151,7 @@ fn patch_npc_hinox(patcher: &mut Patcher) {
 
 /// Change args to allow freestanding objects to have different models
 fn patch_freestanding_items(patcher: &mut Patcher, settings: &Settings) {
-    if !settings.change_freestanding_models {
+    if !crate::true_item_models(settings) {
         return;
     }
 

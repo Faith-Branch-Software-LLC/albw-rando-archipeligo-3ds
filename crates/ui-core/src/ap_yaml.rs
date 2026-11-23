@@ -290,7 +290,6 @@ pub fn options(settings: &Settings) -> Vec<(&'static str, String)> {
         ("sword_in_shop", text(yes(settings.sword_in_shop))),
         ("boots_in_shop", text(yes(settings.boots_in_shop))),
         ("night_mode", text(yes(settings.night_mode))),
-        ("change_freestanding_models", text(yes(settings.change_freestanding_models))),
     ]
 }
 

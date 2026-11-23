@@ -225,8 +225,16 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 }
 
+static RESERVE: AtomicUsize = AtomicUsize::new(0);
+
+/// All memory the app's Rust code can use: the pool and the part left for small objects.
+pub fn capacity() -> usize {
+    with_pool(|pool| pool.size()) + RESERVE.load(Relaxed)
+}
+
 /// Reserves the pool, leaving the given amount for small objects and thread stacks.
 pub fn start_pool(heap: usize, reserve: usize) {
+    RESERVE.store(reserve, Relaxed);
     // SAFETY: Only this thread exists yet.
     unsafe { ctru_sys::LightLock_Init(POOL.lock.get()) };
     let size = heap.saturating_sub(reserve);

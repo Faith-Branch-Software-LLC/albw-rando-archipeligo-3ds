@@ -276,6 +276,7 @@ pub fn get_seed_settings() -> Result<Settings, String> {
         sword_in_shop,
         boots_in_shop,
         assured_weapon,
+        shop_prices: Default::default(),
         hint_ghosts: HintGhosts::Always,
         chest_size_matches_contents,
         change_freestanding_models,

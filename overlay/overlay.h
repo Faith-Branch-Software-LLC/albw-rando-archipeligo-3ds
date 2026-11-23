@@ -32,6 +32,13 @@ typedef struct
 } Canvas;
 
 void canvas_fill(const Canvas *canvas, int x, int y, int w, int h, u32 rgb);
+// A box with rounded corners, blended over what is there: `alpha` 255 is solid, 0 invisible.
+void canvas_box(const Canvas *canvas, int x, int y, int w, int h, int radius, u32 rgb, u32 alpha);
+// A filled circle.
+void canvas_disc(const Canvas *canvas, int cx, int cy, int radius, u32 rgb);
+// A button's name in a badge like the app's hints: round for one letter, a pill for more.
+// Returns the badge's width.
+int canvas_badge(const Canvas *canvas, int x, int y, const char *name);
 int canvas_text(const Canvas *canvas, int x, int y, const char *text, u32 rgb);
 void overlay_log(const char *format, ...);
 
@@ -42,7 +49,12 @@ void map_open(void);
 void map_switch_world(void);
 // The player touched the bottom screen at x, y while the map is open.
 void map_touch(int x, int y);
-void map_draw_dungeons(const Canvas *canvas);
+// Sets the name of the button that opens the map, for the map's hints.
+void map_set_button(const char *name);
+// Moves the zoomed-in view one step in a D-pad direction: x and y are -1, 0 or 1, down positive.
+void map_pan(int x, int y, u64 now);
+// False while a stage loads.
+bool map_player_present(void);
 // True while a save file is being played, not on the title screen.
 bool map_in_save(void);
 // Called often: follows cracks the player uses, and keeps an open map up to date.

@@ -30,8 +30,12 @@ CATEGORIES = [
     ("Dungeons", ["small_keys", "big_keys", "compasses", "key_rings", "chest_size_matches_contents"]),
     ("World", ["initial_crack_state", "crack_shuffle", "weather_vanes", "skip_big_bomb_flower",
                "treacherous_tower_floors", "hint_ghosts"]),
-    ("Looks", ["night_mode", "change_freestanding_models"]),
+    ("Looks", ["night_mode"]),
 ]
+
+# Options the app leaves off its pages. True item models crashed the game on a New 3DS in too many
+# seeds, so the app never turns them on.
+HIDDEN = {"change_freestanding_models"}
 
 # Options every Archipelago game has, from Archipelago's own Options.py.
 COMMON = {
@@ -219,10 +223,10 @@ def describe_options():
             low, high = values["range_start"], values["range_end"]
             described[key] = (label, "Range", (low, high, values.get("default", low)), general, [])
     listed = [key for _, keys in CATEGORIES for key in keys]
-    missing = set(described) - set(listed)
+    missing = set(described) - set(listed) - HIDDEN
     unknown = set(listed) - set(described)
     assert not missing and not unknown, f"Put these options in CATEGORIES: {missing}; unknown: {unknown}"
-    return described
+    return {key: value for key, value in described.items() if key not in HIDDEN}
 
 
 def write_options():

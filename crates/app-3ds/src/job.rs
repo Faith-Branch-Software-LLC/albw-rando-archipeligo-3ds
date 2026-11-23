@@ -53,12 +53,12 @@ const LUMA_TITLES: &str = "sdmc:/luma/titles";
 const TITLE_ID: u64 = 0x0004_0000_000E_C300;
 const MOUNT: &str = "albw";
 
-const OLD_3DS_BUDGET_MB: usize = 18;
-/// A New 3DS has room to spare at this budget, which keeps its small-object heap well clear of full.
-const NEW_3DS_BUDGET_MB: usize = 40;
-/// The largest free block the patcher keeps. The biggest scene archive needs about 6.5 MB in one
-/// piece once decompressed, beside its compressed copy.
-const PATCH_HEADROOM_MB: usize = 9;
+/// Memory the patcher leaves for everything its count of Rust memory does not see: thread stacks,
+/// graphics, fonts, and the allocator's own bookkeeping. The patcher may use the rest of what the
+/// console gave the app, and frees only as much as the next archive needs when it runs short.
+const PATCH_MARGIN_MB: usize = 12;
+/// The largest free block the patcher keeps, for the biggest pieces one archive needs at once.
+const PATCH_HEADROOM_MB: usize = 10;
 
 pub struct Request {
     pub seed: u32,
@@ -218,7 +218,12 @@ pub fn on_progress(phase: &'static str, done: u32, total: u32) {
     let mut last = LAST_PHASE.lock().unwrap();
     if *last != phase {
         *last = phase;
-        log(&format!("{} ms  {phase}  [{}]", now_ms() % 100_000_000, memory::heap_state()));
+        log(&format!(
+            "{} ms  {phase}  [{}]  [{}]",
+            now_ms() % 100_000_000,
+            memory::heap_state(),
+            rom::spill::io::report()
+        ));
     }
     drop(last);
     progress::report(phase, done, total);
@@ -699,6 +704,10 @@ fn run(request: Request) -> Result<(), String> {
     // SAFETY: libctru sets this once during startup, before main.
     let heap_mb = unsafe { crate::__ctru_heap_size } as f32 / (1024.0 * 1024.0);
     log(&format!("Memory plan: {}, heap {heap_mb:.1} MB", if new_memory { "New 3DS" } else { "Old 3DS (small heap)" }));
+    rom::spill::io::reset();
+    // SAFETY: Takes no arguments and only reports which core runs this thread.
+    let core = unsafe { ctru_sys::svcGetProcessorID() };
+    log(&format!("Worker on core {core}"));
     if archipelago.is_none() {
         log(&format!("Seed {seed}, typed by the player: {seed_was_typed}"));
         log(&format!("Preset: {preset_name}"));
@@ -766,12 +775,15 @@ fn run(request: Request) -> Result<(), String> {
 
     let _ = fs::remove_dir_all(BUILD_DIR);
     let _ = fs::remove_dir_all(SPILL_DIR);
-    let budget = if new_memory { NEW_3DS_BUDGET_MB } else { OLD_3DS_BUDGET_MB };
+    let limit = memory::capacity().saturating_sub(PATCH_MARGIN_MB * 1024 * 1024);
+    log(&format!("Patch memory limit {:.1} MB", limit as f32 / 1048576.0));
     rom::spill::configure(rom::spill::Budget {
         dir: SPILL_DIR.into(),
-        limit: budget * 1024 * 1024,
+        limit,
         usage: memory::usage,
-        clear_before_compress: true,
+        // An Old 3DS has too little room to compress beside the archives it keeps, so they all go
+        // to the SD card first. A New 3DS frees only what compressing needs.
+        clear_before_compress: !new_memory,
         largest_free: Some(memory::largest_free),
         headroom: PATCH_HEADROOM_MB * 1024 * 1024,
     });

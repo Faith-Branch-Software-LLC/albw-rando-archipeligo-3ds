@@ -310,6 +310,11 @@ static bool readSharedFramebuffer(bool top, Framebuffer *fb)
 {
     if (!findGspShared())
         return false;
+    // The game unmaps the block when it closes, and reading it then would crash.
+    MemInfo mapping;
+    PageInfo page;
+    if (R_FAILED(svcQueryMemory(&mapping, &page, (u32)gspShared)) || mapping.state != MEMSTATE_SHARED)
+        return false;
     vu32 *info = sharedInfo(gspShared, gspSlot, top);
     u32 left = physicalOf(info[1]);
     if (!left)
@@ -324,9 +329,15 @@ static bool readSharedFramebuffer(bool top, Framebuffer *fb)
     return true;
 }
 
+// True when the screens are found through GSP shared memory, as on a real 3DS. The buffer named
+// there is one the game has finished and asked to show, while its other buffers may be half drawn
+// by the GPU; drawing on those flickered, so only the named one is drawn on.
+static bool sharedMode;
+
 static bool readFramebuffer(bool top, Framebuffer *fb)
 {
     // 0: reply into the plugin's memory, 1: through the command buffer, 2: GSP shared memory.
+    // Kept in `sharedMode` too, which changes how buffers are drawn on.
 #ifdef PLUGIN_FORCE_SHARED
     static int way = 2;
 #else
@@ -342,7 +353,10 @@ static bool readFramebuffer(bool top, Framebuffer *fb)
         way++;
     }
     if (way == 2)
+    {
+        sharedMode = true;
         return readSharedFramebuffer(top, fb);
+    }
     fb->address[0] = regs[0];
     fb->address[1] = regs[1];
     fb->format = regs[2];
@@ -360,9 +374,12 @@ static u8 *virtualAddress(u32 physical, u32 size)
 {
     u32 candidates[2];
     int count = 0;
-    if (physical >= 0x18000000 && physical < 0x18600000)
-        candidates[count++] = physical - 0x18000000 + 0x1F000000;
-    else if (physical >= 0x20000000 && physical < 0x28000000)
+    // The game maps VRAM read-only from its exheader, and the kernel does not list such mappings,
+    // so asking about the address says nothing useful. Luma's plugin loader makes all of the
+    // game's memory writable, so the address is used as it is.
+    if (physical >= 0x18000000 && physical + size <= 0x18600000)
+        return (u8 *)(physical - 0x18000000 + 0x1F000000);
+    if (physical >= 0x20000000 && physical < 0x28000000)
     {
         candidates[count++] = physical - 0x20000000 + 0x30000000;
         candidates[count++] = physical - 0x20000000 + 0x14000000;
@@ -432,6 +449,101 @@ void canvas_fill(const Canvas *canvas, int x, int y, int w, int h, u32 rgb)
     }
 }
 
+// The color of a pixel, as 0xRRGGBB.
+static u32 unpackColor(const Canvas *canvas, const u8 *pixel)
+{
+    u32 r, g, b;
+    switch (canvas->format)
+    {
+    case 0: return *(const u32 *)pixel >> 8;
+    case 1: return pixel[0] | pixel[1] << 8 | pixel[2] << 16;
+    case 2:
+    {
+        u16 v = *(const u16 *)pixel;
+        r = v >> 11, g = (v >> 5) & 0x3F, b = v & 0x1F;
+        return (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
+    }
+    case 3:
+    {
+        u16 v = *(const u16 *)pixel;
+        r = v >> 11, g = (v >> 6) & 0x1F, b = (v >> 1) & 0x1F;
+        return (r << 3 | r >> 2) << 16 | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2);
+    }
+    default:
+    {
+        u16 v = *(const u16 *)pixel;
+        return ((v >> 12) * 17) << 16 | (((v >> 8) & 0xF) * 17) << 8 | ((v >> 4) & 0xF) * 17;
+    }
+    }
+}
+
+static void putPixel(const Canvas *canvas, u8 *pixel, u32 color)
+{
+    switch (canvas->bpp)
+    {
+    case 4: *(u32 *)pixel = color; break;
+    case 3: pixel[0] = color; pixel[1] = color >> 8; pixel[2] = color >> 16; break;
+    default: *(u16 *)pixel = color; break;
+    }
+}
+
+static u32 mix(u32 under, u32 over, u32 alpha)
+{
+    u32 out = 0;
+    for (int shift = 0; shift < 24; shift += 8)
+    {
+        u32 a = (under >> shift) & 0xFF, b = (over >> shift) & 0xFF;
+        out |= ((a * (255 - alpha) + b * alpha) / 255) << shift;
+    }
+    return out;
+}
+
+// True when (column, row) is inside a box with rounded corners.
+static bool insideRounded(int column, int row, int x, int y, int w, int h, int radius)
+{
+    int dx = column < x + radius ? x + radius - column : column > x + w - 1 - radius ? column - (x + w - 1 - radius) : 0;
+    int dy = row < y + radius ? y + radius - row : row > y + h - 1 - radius ? row - (y + h - 1 - radius) : 0;
+    return dx * dx + dy * dy <= radius * radius;
+}
+
+void canvas_box(const Canvas *canvas, int x, int y, int w, int h, int radius, u32 rgb, u32 alpha)
+{
+    if (radius * 2 > w)
+        radius = w / 2;
+    if (radius * 2 > h)
+        radius = h / 2;
+    u32 solid = packColor(canvas, rgb);
+    for (int column = x < 0 ? 0 : x; column < x + w && column < canvas->width; column++)
+    {
+        u8 *line = canvas->pixels + column * canvas->stride;
+        for (int row = y < 0 ? 0 : y; row < y + h && row < 240; row++)
+        {
+            if (!insideRounded(column, row, x, y, w, h, radius))
+                continue;
+            u8 *pixel = line + (239 - row) * canvas->bpp;
+            putPixel(canvas, pixel, alpha >= 255 ? solid : packColor(canvas, mix(unpackColor(canvas, pixel), rgb, alpha)));
+        }
+    }
+}
+
+void canvas_disc(const Canvas *canvas, int cx, int cy, int radius, u32 rgb)
+{
+    canvas_box(canvas, cx - radius, cy - radius, radius * 2 + 1, radius * 2 + 1, radius, rgb, 255);
+}
+
+// The app's hint colors: light yellow badges with dark letters.
+#define BADGE_RGB 0xFFEE9C
+#define BADGE_TEXT_RGB 0x1A1F2E
+
+int canvas_badge(const Canvas *canvas, int x, int y, const char *name)
+{
+    int length = strlen(name);
+    int width = length == 1 ? 12 : length * 8 + 8;
+    canvas_box(canvas, x, y, width, 12, 6, BADGE_RGB, 255);
+    canvas_text(canvas, x + (width - length * 8) / 2, y + 2, name, BADGE_TEXT_RGB);
+    return width;
+}
+
 extern const u8 default_font_bin[];
 
 // Draws text in libctru's 8x8 console font, scaled 1x. Returns the width drawn.
@@ -482,10 +594,15 @@ static void timerFrame(u64 now)
 {
     if (now - inSaveCheckedAt > TICKS_PER_MS * 500)
     {
+        bool wasInSave = inSave;
         inSave = map_in_save();
         inSaveCheckedAt = now;
+        // Loading a save file starts the timer.
+        if (inSave && !wasInSave)
+            timerRunning = true;
     }
-    if (lastTopSwap && timerRunning && inSave)
+    // While a stage loads there is no player, and that time is left out, like other gaps.
+    if (lastTopSwap && timerRunning && inSave && map_player_present())
     {
         u64 gap = now - lastTopSwap;
         if (gap < LOAD_GAP)
@@ -508,8 +625,8 @@ static void drawTimer(const Canvas *canvas)
     else
         snprintf(text, sizeof(text), "%lu:%02lu.%lu", minutes, seconds, tenths);
     int width = strlen(text) * 8;
-    canvas_fill(canvas, 0, 0, width + 6, 12, 0x101010);
-    canvas_text(canvas, 3, 2, text, timerRunning ? 0xFFFFFF : 0xFFD040);
+    canvas_box(canvas, 2, 2, width + 10, 14, 5, 0x101010, 170);
+    canvas_text(canvas, 7, 5, text, timerRunning ? 0xFFFFFF : 0xFFD040);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -655,17 +772,15 @@ static void drawOn(Screen *screen, u32 address, u32 *version)
         if (showHello)
         {
             static const char hello[] = "ALBW Randomizer QoL plugin on";
-            canvas_fill(&canvas, 0, 226, sizeof(hello) * 8 + 4, 14, 0x101010);
-            canvas_text(&canvas, 3, 229, hello, 0xFFFFFF);
+            canvas_box(&canvas, 2, 224, sizeof(hello) * 8 + 6, 14, 5, 0x101010, 170);
+            canvas_text(&canvas, 6, 227, hello, 0xFFFFFF);
         }
         const char *banner = rpc_banner();
         if (banner)
         {
-            canvas_fill(&canvas, 0, 14, strlen(banner) * 8 + 6, 12, 0x101060);
-            canvas_text(&canvas, 3, 16, banner, 0xFFFFFF);
+            canvas_box(&canvas, 2, 18, strlen(banner) * 8 + 10, 14, 5, 0x101060, 190);
+            canvas_text(&canvas, 7, 21, banner, 0xFFFFFF);
         }
-        if (mapOpen)
-            map_draw_dungeons(&canvas);
     }
     else
         map_draw(&canvas);
@@ -701,6 +816,17 @@ static void followScreen(Screen *screen, u64 now, bool learning, bool wanted)
     }
     if (!wanted)
         return;
+    if (sharedMode)
+    {
+        int index = learnedIndex(screen, shown, false);
+        if (index < 0)
+            return;
+        drawOn(screen, shown, &screen->drawnVersion[index]);
+        u32 right = screen->rightOf[index];
+        if (right && right != shown)
+            drawOn(screen, right, &screen->rightVersion[index]);
+        return;
+    }
     // Every one of the game's buffers gets the overlay as soon as the game has put a new frame in
     // it: the one on screen now, and the ones it shows next. Checking the mark costs one read.
     for (int i = 0; i < 4 && screen->learned[i]; i++)
@@ -753,6 +879,7 @@ static void overlayThread(void *arg)
     }
     if (!archipelago)
         map_load();
+    map_set_button(settings.zl == ACTION_MAP ? "ZL" : "ZR");
     startInput();
     overlay_log("settings: timer %lu, zl %lu, zr %lu", settings.timer, settings.zl, settings.zr);
 
@@ -783,6 +910,13 @@ static void overlayThread(void *arg)
         if (touched && !wasTouched && mapOpen)
             map_touch(touchX, touchY);
         wasTouched = touched;
+        if (mapOpen)
+        {
+            // The D-pad moves the zoomed map. The Circle Pad would move Link too.
+            int padX = !!(keys & KEY_DRIGHT) - !!(keys & KEY_DLEFT);
+            int padY = !!(keys & KEY_DDOWN) - !!(keys & KEY_DUP);
+            map_pan(padX, padY, now);
+        }
         static u64 lastTenth;
         if (settings.timer && timerTicks / (TICKS_PER_MS * 100) != lastTenth)
         {
@@ -836,6 +970,23 @@ static void overlayThread(void *arg)
                 *(vu8 *)(player + 0x598) = 12;
         }
 #endif
+        // The first 200 looks at the map's screen while it is open say how often the frame on
+        // screen has the overlay, so a log shows how much it flickers on a console.
+        if (mapOpen)
+        {
+            static int samples, withOverlay;
+            static u64 sampledAt;
+            Canvas canvas;
+            if (samples < 200 && now - sampledAt > TICKS_PER_MS * 37 && bottom.fb.shown &&
+                canvasFor(&bottom.fb, bottom.fb.shown, 320, &canvas))
+            {
+                sampledAt = now;
+                samples++;
+                withOverlay += marked(&canvas);
+                if (samples == 200)
+                    overlay_log("map shown on %d of 200 frames", withOverlay);
+            }
+        }
         rpc_poll();
         map_tick(now, mapOpen);
         // Each look at a screen asks the GPU service, so the plugin only follows the screens it
@@ -857,7 +1008,9 @@ static void overlayThread(void *arg)
             followScreen(&top, now, learning, settings.timer || mapOpen || banner);
         if (mapOpen || learning)
             followScreen(&bottom, now, learning, mapOpen);
-        svcSleepThread(2000000LL);
+        // On a real 3DS a frame must get the overlay between the game asking to show it and the
+        // next screen refresh, so the plugin looks often.
+        svcSleepThread(sharedMode ? 1000000LL : 2000000LL);
     }
 }
 

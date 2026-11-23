@@ -81,7 +81,26 @@ pub struct Patcher {
     true_models: std::collections::HashSet<&'static str>,
     /// The message font's glyph widths, for wrapping text.
     font: std::rc::Rc<rom::font::Font>,
+    /// When each course's messages (stage `None`) and each scene's actors were last used, by a
+    /// counter that goes up with each use. The longest unused leave memory first.
+    last_used: HashMap<(CourseId, Option<u16>), u64>,
+    boot_used: u64,
+    clock: u64,
 }
+
+/// The archive the code in progress is using, which stays in memory while others leave.
+#[derive(Clone, Copy, PartialEq)]
+enum InUse {
+    Nothing,
+    Boot,
+    Course(CourseId),
+    Scene(CourseId, u16),
+}
+
+/// The memory compressing one archive needs: the archive in one piece, its compressed copy, and
+/// the compressor's tables. The biggest archive is about 6.5 MB in one piece.
+const COMPRESS_ROOM: usize = 12 * 1024 * 1024;
+const COMPRESS_PIECE: usize = 7 * 1024 * 1024;
 
 impl Patcher {
     pub fn new(game: Rom) -> Result<Self> {
@@ -98,6 +117,9 @@ impl Patcher {
             stream_to: None,
             true_models: Default::default(),
             font,
+            last_used: Default::default(),
+            boot_used: 0,
+            clock: 0,
         })
     }
 
@@ -107,24 +129,58 @@ impl Patcher {
         self
     }
 
-    /// If over the memory budget, moves every archive except the one in use to disk.
+    /// If over the memory budget, moves archives to disk, least recently used first, until there
+    /// is room again. The archive about to be used stays.
     fn make_room(&mut self, keep: Option<(CourseId, Option<u16>)>) {
-        if !rom::spill::over_limit() {
+        let in_use = match keep {
+            None => InUse::Boot,
+            Some((course, None)) => InUse::Course(course),
+            Some((course, Some(stage))) => InUse::Scene(course, stage),
+        };
+        self.free_memory(in_use, 0, 0);
+    }
+
+    /// Moves archives to disk, least recently used first, until `extra` more bytes fit, the
+    /// largest piece of them `piece` bytes.
+    fn free_memory(&mut self, in_use: InUse, extra: usize, piece: usize) {
+        self.clock += 1;
+        match in_use {
+            InUse::Nothing => {},
+            InUse::Boot => self.boot_used = self.clock,
+            InUse::Course(course) => {
+                self.last_used.insert((course, None), self.clock);
+            },
+            InUse::Scene(course, stage) => {
+                self.last_used.insert((course, Some(stage)), self.clock);
+            },
+        }
+        if !rom::spill::over_limit_with(extra, piece) {
             return;
         }
-        if keep.is_some() {
-            log_spill(self.boot.spill());
+        let mut candidates: Vec<(u64, Option<(CourseId, Option<u16>)>)> = Vec::new();
+        if in_use != InUse::Boot {
+            candidates.push((self.boot_used, None));
         }
         for (id, course) in &self.courses {
-            let kept_course = keep.is_some_and(|(course, _)| course == *id);
-            if !kept_course {
-                log_spill(course.language.spill());
+            if in_use != InUse::Course(*id) {
+                candidates.push((self.last_used.get(&(*id, None)).copied().unwrap_or(0), Some((*id, None))));
             }
-            for (stage, scene) in &course.scenes {
-                let kept_scene = kept_course && keep.is_some_and(|(_, kept)| kept == Some(*stage));
-                if !kept_scene {
-                    log_spill(scene.actors().spill());
+            for stage in course.scenes.keys() {
+                if in_use != InUse::Scene(*id, *stage) {
+                    let used = self.last_used.get(&(*id, Some(*stage))).copied().unwrap_or(0);
+                    candidates.push((used, Some((*id, Some(*stage)))));
                 }
+            }
+        }
+        candidates.sort_by_key(|(used, _)| *used);
+        for (_, target) in candidates {
+            match target {
+                None => log_spill(self.boot.spill()),
+                Some((course, None)) => log_spill(self.courses[&course].language.spill()),
+                Some((course, Some(stage))) => log_spill(self.courses[&course].scenes[&stage].actors().spill()),
+            }
+            if !rom::spill::over_limit_with(extra, piece) {
+                return;
             }
         }
     }
@@ -734,7 +790,7 @@ impl Patcher {
         // Seeds 1 and 3 with open cross-world cracks crashed at boot in Azahar with both merge from
         // the start and item models, and booted with either one alone. The cause is not known yet,
         // so with merge from the start every loose item keeps its usual model.
-        if seed_info.settings.change_freestanding_models && !seed_info.settings.start_with_merge {
+        if crate::true_item_models(&seed_info.settings) && !seed_info.settings.start_with_merge {
             self.true_models = choose_true_models(seed_info, &item_actors);
         }
 
@@ -748,7 +804,7 @@ impl Patcher {
             kakariko_actors.add(item_actors.get(&merchant[0].normalize()).unwrap().clone())?;
             kakariko_actors.add(item_actors.get(&merchant[2].normalize()).unwrap().clone())?;
 
-            if seed_info.settings.change_freestanding_models {
+            if crate::true_item_models(&seed_info.settings) {
                 for data in [HEART_PIECES.iter(), HEART_CONTAINERS.iter(), SMALL_KEYS.iter(), RUPEES.iter()] {
                     for (name, _, _, _) in data {
                         if !true_models.contains(name) {
@@ -771,6 +827,11 @@ impl Patcher {
         let code = code::create(&self, seed_info);
 
         report("Compressing files", 0, 0);
+        // Compressing needs room of its own. Archives leave memory, least recently used first,
+        // until it fits, or all of them when the console asked for that.
+        if !rom::spill::clear_before_compress() {
+            self.free_memory(InUse::Nothing, COMPRESS_ROOM, COMPRESS_PIECE);
+        }
         if rom::spill::clear_before_compress() {
             log_spill(self.boot.spill());
             log_spill(common_archive.spill());
@@ -1087,7 +1148,7 @@ fn choose_true_models(
                 }
             }
         }
-        info!("True item models: {} KB of {} KB used", spent / 1024, budget / 1024);
+        info!("True item models: {} KB of {} KB used by {} models", spent / 1024, budget / 1024, loaded.len());
     }
     chosen
 }

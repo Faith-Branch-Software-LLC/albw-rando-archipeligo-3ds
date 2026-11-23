@@ -120,12 +120,20 @@ impl RomSource {
     {
         let path: String = path.into();
         match self {
-            Self::Image(romfs) => romfs.read(path),
+            Self::Image(romfs) => spill::io::timed(spill::io::Kind::Game, || {
+                let file = romfs.read(path);
+                let size = file.as_ref().map_or(0, |file| file.get().len());
+                (file, size)
+            }),
             Self::Mounted(root) => {
                 let path: String = path.into();
                 let relative = path.strip_prefix('/').unwrap_or(&path);
-                let data = fs::read(format!("{root}{relative}"))
-                    .map_err(|err| Error::new(format!("Could not read '{relative}': {err}")))?;
+                let data = spill::io::timed(spill::io::Kind::Game, || {
+                    let data = fs::read(format!("{root}{relative}"));
+                    let size = data.as_ref().map_or(0, Vec::len);
+                    (data, size)
+                })
+                .map_err(|err| Error::new(format!("Could not read '{relative}': {err}")))?;
                 Ok(File::new(path, data.into_boxed_slice()))
             }
             Self::Overlaid(folders, game) => {
@@ -133,9 +141,13 @@ impl RomSource {
                 let relative = path.strip_prefix('/').unwrap_or(&path);
                 for folder in folders.iter() {
                     let file = folder.join(relative);
-                    if file.is_file() {
-                        let data = fs::read(&file)
-                            .map_err(|err| Error::new(format!("Could not read '{}': {err}", file.display())))?;
+                    if spill::io::timed(spill::io::Kind::Game, || (file.is_file(), 0)) {
+                        let data = spill::io::timed(spill::io::Kind::Game, || {
+                            let data = fs::read(&file);
+                            let size = data.as_ref().map_or(0, Vec::len);
+                            (data, size)
+                        })
+                        .map_err(|err| Error::new(format!("Could not read '{}': {err}", file.display())))?;
                         return Ok(File::new(path, data.into_boxed_slice()));
                     }
                 }

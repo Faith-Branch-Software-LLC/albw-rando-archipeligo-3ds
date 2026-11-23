@@ -1180,12 +1180,6 @@ impl Menu {
             Page::Patch => vec![
                 row("Patch the Game", None, "Builds the game for this multiworld. Play it with the Archipelago client on a computer.", Target::ApplyPatch),
                 row("Night Mode", Some(LOOK_CHOICES[self.looks[0]].to_owned()), "Darker world. Looks only, so it never changes the multiworld.", Target::Look(Look::NightMode)),
-                row(
-                    "Freestanding Models",
-                    Some(LOOK_CHOICES[self.looks[1]].to_owned()),
-                    "Items on the ground show what they are. Looks only, so it never changes the multiworld.",
-                    Target::Look(Look::FreestandingModels),
-                ),
                 row("Models and Voices", Some(format!("{} / {}", self.model.text(), self.voice.text())), "Your player model and voice go into this patch too. Only you see them.", Target::Open(Page::Mods)),
                 row("Go Back", None, "", Target::Back),
             ],
