@@ -1,6 +1,7 @@
-# Builds the "A Link Between Worlds - 3DS" apworld and, on a version tag, makes the release with it
-# and the FBI QR code. The 3DS app, CIA and SD card zip are built on the maintainer's computer and
-# added with tools/release-3ds.sh, because the menu sounds' license keeps them out of git.
+# Builds the parts of a release this Mac cannot make: the randomizer module for Linux and Windows,
+# and the FBI QR code. tools/release-3ds.sh pushes the version tag, waits for this workflow,
+# downloads what it built, builds the macOS modules, the apworld and the 3DS app on the Mac, and
+# makes the release. macOS runners are left out, as they are scarce and being retired.
 name: Release
 
 on:
@@ -17,8 +18,6 @@ jobs:
         include:
           - { runner: ubuntu-22.04, tag: linux-x86_64 }
           - { runner: ubuntu-22.04-arm, tag: linux-aarch64 }
-          - { runner: macos-15, tag: darwin-arm64 }
-          - { runner: macos-15-intel, tag: darwin-x86_64 }
           - { runner: windows-latest, tag: win32-amd64 }
           - { runner: windows-11-arm, tag: win32-arm64 }
     runs-on: ${{ matrix.runner }}
@@ -40,51 +39,10 @@ jobs:
           path: target/apworld/stage/albw_3ds/albw3dsrandomizer/lib/${{ matrix.tag }}/
           if-no-files-found: error
 
-  apworld:
-    name: Pack the apworld
-    needs: randomizer-module
+  qr-code:
+    name: FBI QR code
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: module-*
-          path: downloaded
-      - name: Pack every system's module
-        run: |
-          mkdir -p apworld/prebuilt
-          for folder in downloaded/module-*; do
-            mkdir -p "apworld/prebuilt/${folder#downloaded/module-}"
-            cp "$folder"/* "apworld/prebuilt/${folder#downloaded/module-}/"
-          done
-          APWORLD_PACK_ONLY=1 sh apworld/build.sh python
-      - uses: actions/upload-artifact@v7
-        with:
-          name: apworld
-          path: |
-            target/apworld/albw_3ds.apworld
-            target/apworld/version.txt
-          if-no-files-found: error
-
-  release:
-    name: Release
-    needs: apworld
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: built
-      - name: Collect the apworld
-        run: |
-          cp built/apworld/albw_3ds.apworld .
-          # Universal-Updater's script saves this next to the apworld as version.txt, and
-          # tools/release-3ds.sh puts it in the SD card zip.
-          cp built/apworld/version.txt apworld-version.txt
       - name: Make the FBI QR code
         # FBI's Remote Install scans this code and downloads this release's CIA.
         run: |
@@ -94,34 +52,6 @@ jobs:
             "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/albw-rando.cia"
       - uses: actions/upload-artifact@v7
         with:
-          name: release
-          path: |
-            albw_3ds.apworld
-            apworld-version.txt
-            albw-rando-qr.png
-      - name: Publish
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
-        with:
-          # A draft until tools/release-3ds.sh adds the app and publishes it.
-          draft: true
-          files: |
-            albw_3ds.apworld
-            apworld-version.txt
-            albw-rando-qr.png
-          body: |
-            ## Install with FBI
-
-            In FBI, choose Remote Install, then Scan QR Code, and point the camera at this code.
-            It installs this release's albw-rando.cia.
-
-            ![QR code for albw-rando.cia](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/albw-rando-qr.png)
-
-            ## Install by hand
-
-            Extract albw-rando-sd.zip to the root of your SD card. It adds the app and the
-            /3ds/albw-rando folder with the apworld that the albw.local page offers to hosts.
-            To have the app on the HOME Menu, also install albw-rando.cia with FBI.
-
-            Hosts: put albw_3ds.apworld in Archipelago/custom_worlds/. The game is
-            "A Link Between Worlds - 3DS", based on randomsalience's albw-archipelago.
+          name: qr-code
+          path: albw-rando-qr.png
+          if-no-files-found: error

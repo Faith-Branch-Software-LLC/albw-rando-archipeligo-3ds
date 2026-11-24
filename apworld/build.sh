@@ -8,13 +8,18 @@
 # such as by CI, can be put in apworld/prebuilt/<system>-<machine>/ and are packed too. The
 # result is target/apworld/albw_3ds.apworld.
 #
-# With APWORLD_PACK_ONLY=1 it builds nothing and packs only the prebuilt modules, which is how the
-# release workflow joins the modules each system built.
+# With APWORLD_PACK_ONLY=1 it builds nothing and packs only the prebuilt modules, which is how
+# tools/release-3ds.sh joins the modules each system built. APWORLD_PREBUILT names another folder
+# of prebuilt modules instead of apworld/prebuilt.
+#
+# To build for another machine of this system, set APWORLD_TARGET to its Rust target and
+# APWORLD_TAG to its folder name, such as aarch64-apple-darwin and darwin-arm64 on an Intel Mac.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 python=${1:-python3}
-tag=$("$python" -c 'import platform, sys; print(f"{sys.platform}-{platform.machine().lower()}")')
+tag=${APWORLD_TAG:-$("$python" -c 'import platform, sys; print(f"{sys.platform}-{platform.machine().lower()}")')}
+prebuilt=${APWORLD_PREBUILT:-"$root/apworld/prebuilt"}
 stage="$root/target/apworld/stage"
 cargo_dir=${CARGO_TARGET_DIR:-"$root/target/apworld/cargo"}
 
@@ -29,8 +34,9 @@ esac
 
 if [ "${APWORLD_PACK_ONLY:-0}" != 1 ]; then
     PYO3_PYTHON="$python" cargo build --release --lib --manifest-path "$root/vendor/z17-randomizer/Cargo.toml" \
-        --target-dir "$cargo_dir"
+        --target-dir "$cargo_dir" ${APWORLD_TARGET:+--target "$APWORLD_TARGET"}
 fi
+out_dir="$cargo_dir/${APWORLD_TARGET:+$APWORLD_TARGET/}release"
 
 rm -rf "$stage"
 mkdir -p "$stage"
@@ -38,10 +44,10 @@ cp -R "$root/apworld/albw_3ds" "$stage/albw_3ds"
 find "$stage" -name "__pycache__" -type d -prune -exec rm -rf {} +
 if [ "${APWORLD_PACK_ONLY:-0}" != 1 ]; then
     mkdir -p "$stage/albw_3ds/albw3dsrandomizer/lib/$tag"
-    cp "$cargo_dir/release/$built" "$stage/albw_3ds/albw3dsrandomizer/lib/$tag/$module"
+    cp "$out_dir/$built" "$stage/albw_3ds/albw3dsrandomizer/lib/$tag/$module"
 fi
-if [ -d "$root/apworld/prebuilt" ]; then
-    cp -R "$root/apworld/prebuilt/." "$stage/albw_3ds/albw3dsrandomizer/lib/"
+if [ -d "$prebuilt" ]; then
+    cp -R "$prebuilt/." "$stage/albw_3ds/albw3dsrandomizer/lib/"
 fi
 
 mkdir -p "$root/target/apworld"
