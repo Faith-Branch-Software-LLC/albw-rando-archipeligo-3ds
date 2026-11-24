@@ -939,10 +939,10 @@ pub fn start_copy(media: ctru_sys::FS_MediaType) -> Result<Vec<String>, String> 
 /// The QoL plugin's pictures of Hyrule and Lorule, made from the game's own map.
 /// The large ones are for the zoomed-in view.
 const MAP_PICTURES: [(&str, &str, usize, bool); 4] = [
-    ("World/Layout/MapTexture/Lyt_FieldLight.bch", "sdmc:/3ds/albw-rando/qol/map-hyrule.bin", 232, false),
-    ("World/Layout/MapTexture/Lyt_FieldDark.bch", "sdmc:/3ds/albw-rando/qol/map-lorule.bin", 232, false),
-    ("World/Layout/MapTexture/Lyt_FieldLight.bch", "sdmc:/3ds/albw-rando/qol/map-hyrule-large.bin", 464, true),
-    ("World/Layout/MapTexture/Lyt_FieldDark.bch", "sdmc:/3ds/albw-rando/qol/map-lorule-large.bin", 464, true),
+    ("World/Layout/MapTexture/Lyt_FieldLight.bch", "sdmc:/3ds/albw-rando/qol/map2-hyrule.bin", 232, false),
+    ("World/Layout/MapTexture/Lyt_FieldDark.bch", "sdmc:/3ds/albw-rando/qol/map2-lorule.bin", 232, false),
+    ("World/Layout/MapTexture/Lyt_FieldLight.bch", "sdmc:/3ds/albw-rando/qol/map2-hyrule-large.bin", 464, true),
+    ("World/Layout/MapTexture/Lyt_FieldDark.bch", "sdmc:/3ds/albw-rando/qol/map2-lorule-large.bin", 464, true),
 ];
 
 /// Makes the logic map's pictures from the player's game files, once. They stay on the SD card

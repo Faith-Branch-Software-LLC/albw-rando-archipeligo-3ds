@@ -125,9 +125,9 @@ pub fn map_picture(bch: Vec<u8>, size: usize, large: bool) -> Result<Vec<u16>, S
     let texture = textures.iter().find(|texture| texture.name.starts_with(prefix)).ok_or("no field map")?;
     let pixels = decode(texture).ok_or("the map's format is not one this app reads")?;
     let (width, height) = (usize::from(texture.width), usize::from(texture.height));
-    // The world fills the picture inside its frame, from 41/256 to 216/256 each way.
-    let (left, top) = (width * 41 / 256, height * 41 / 256);
-    let (across, down) = (width * 175 / 256, height * 175 / 256);
+    // Map units cover the whole picture, frame included. Up to 0.3.13 this cut the picture to
+    // 41/256..216/256, which hid the edges and put every check in the wrong spot.
+    let (left, top, across, down) = (0, 0, width, height);
     let mut out = Vec::with_capacity(size * size);
     for y in 0..size {
         for x in 0..size {

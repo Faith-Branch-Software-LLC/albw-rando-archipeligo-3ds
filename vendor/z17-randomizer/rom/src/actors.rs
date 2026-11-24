@@ -29,8 +29,8 @@ impl Actors {
 
     /// Returns true if the archive can come back from the ROM, and frees it.
     fn drop_clean(&self) -> bool {
-        if let (false, Some(source)) = (self.dirty, &self.source) {
-            self.archive.get().release(source, self.archive.path());
+        if let (false, Some(_)) = (self.dirty, &self.source) {
+            self.archive.get().release();
             true
         } else {
             false

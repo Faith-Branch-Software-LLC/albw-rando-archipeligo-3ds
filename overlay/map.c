@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "map_logic.h"
 #include "overlay.h"
@@ -58,8 +59,8 @@ static const struct
     const char *path;
     int size;
 } PICTURES[2][2] = {
-    {{"sdmc:/3ds/albw-rando/qol/map-hyrule.bin", 232}, {"sdmc:/3ds/albw-rando/qol/map-hyrule-large.bin", 464}},
-    {{"sdmc:/3ds/albw-rando/qol/map-lorule.bin", 232}, {"sdmc:/3ds/albw-rando/qol/map-lorule-large.bin", 464}},
+    {{"sdmc:/3ds/albw-rando/qol/map2-hyrule.bin", 232}, {"sdmc:/3ds/albw-rando/qol/map2-hyrule-large.bin", 464}},
+    {{"sdmc:/3ds/albw-rando/qol/map2-lorule.bin", 232}, {"sdmc:/3ds/albw-rando/qol/map2-lorule-large.bin", 464}},
 };
 static u8 *pictures[2][2];
 
@@ -101,6 +102,82 @@ static bool readFile(const char *path, u8 **data, u32 *size)
     return ok;
 }
 
+// Places the player moved checks to on the map, by check, so the map's table can be corrected.
+// Kept in a file for every seed, one line per moved check: map, x, y, then the check's name.
+#define PLACES_PATH "sdmc:/3ds/albw-rando/qol/places.txt"
+typedef struct
+{
+    u8 set, map, x, y;
+} Moved;
+static Moved *moved;
+
+static MapCheck checkOf(u32 index)
+{
+    MapCheck check = map_check(&map, index);
+    if (moved && moved[index].set)
+    {
+        check.map = moved[index].map;
+        check.x = moved[index].x;
+        check.y = moved[index].y;
+    }
+    return check;
+}
+
+static void loadMoved(void)
+{
+    FILE *file = fopen(PLACES_PATH, "r");
+    if (!file)
+        return;
+    char line[128];
+    int count = 0;
+    // Files without the "v2" line came from 0.3.12 and 0.3.13, whose map picture showed only
+    // 41/256..216/256 of the game's map. Their spots are converted to whole-map units.
+    bool whole = false;
+    while (fgets(line, sizeof(line), file))
+    {
+        if (!strncmp(line, "v2", 2))
+        {
+            whole = true;
+            continue;
+        }
+        unsigned world, x, y;
+        int start = 0;
+        if (sscanf(line, "%u %u %u %n", &world, &x, &y, &start) != 3 || !start)
+            continue;
+        if (!whole)
+        {
+            x = 41 + x * 175 / 256;
+            y = 41 + y * 175 / 256;
+        }
+        char *name = line + start;
+        name[strcspn(name, "\r\n")] = 0;
+        for (u32 i = 0; i < map.checkCount; i++)
+            if (!strcmp(map_check(&map, i).name, name))
+            {
+                moved[i] = (Moved){1, world & 1, x, y};
+                count++;
+            }
+    }
+    fclose(file);
+    overlay_log("map: %d checks moved by %s", count, PLACES_PATH);
+}
+
+static void saveMoved(void)
+{
+    mkdir("sdmc:/3ds/albw-rando/qol", 0777);
+    FILE *file = fopen(PLACES_PATH, "w");
+    if (!file)
+    {
+        overlay_log("map: could not write %s", PLACES_PATH);
+        return;
+    }
+    fputs("v2\n", file);
+    for (u32 i = 0; i < map.checkCount; i++)
+        if (moved[i].set)
+            fprintf(file, "%u %u %u %s\n", moved[i].map, moved[i].x, moved[i].y, map_check(&map, i).name);
+    fclose(file);
+}
+
 void map_load(void)
 {
     u8 *data;
@@ -125,7 +202,10 @@ void map_load(void)
         memcpy(usedCracks, saved, savedSize < map.crackCount ? savedSize : map.crackCount);
         free(saved);
     }
-    loaded = checked && status && usedCracks;
+    moved = calloc(map.checkCount, sizeof(Moved));
+    loaded = checked && status && usedCracks && moved;
+    if (loaded)
+        loadMoved();
     for (int world = 0; world < 2; world++)
         for (int large = 0; large < 2; large++)
         {
@@ -164,7 +244,7 @@ static bool readChecks(void)
     cracksOpen = FLAG_SET(events, CRACKS_OPEN_FLAG);
     for (u32 i = 0; i < map.checkCount; i++)
     {
-        MapCheck check = map_check(&map, i);
+        MapCheck check = checkOf(i);
         bool done = false;
         if (check.flagCourse == FLAG_EVENT)
             done = FLAG_SET(events, check.flag);
@@ -178,6 +258,28 @@ static bool readChecks(void)
         }
         checked[i] = done;
     }
+    return true;
+}
+
+bool map_save_loaded(void)
+{
+    u32 saves = readWord(SAVES_LOCATION);
+    u32 save = saves ? readWord(saves + 0x14) : 0;
+    u32 game = readWord(GAME_LOCATION);
+    return save && readWord(save + 0x1600) == 0 && readable(game + 0x18, 4) && *(vu8 *)(game + 0x18) != 8;
+}
+
+bool map_save_hash(u32 *hash)
+{
+    u32 saves = readWord(SAVES_LOCATION);
+    u32 save = saves ? readWord(saves + 0x14) : 0;
+    if (!save || !readable(save, 0x1600))
+        return false;
+    // FNV-1a over the save file as the game holds it.
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < 0x1600; i++)
+        h = (h ^ *(vu8 *)(save + i)) * 16777619u;
+    *hash = h;
     return true;
 }
 
@@ -351,6 +453,12 @@ extern u32 overlayVersion;
 // The place the player tapped, whose checks are listed until they tap somewhere else.
 static bool selected;
 static u8 selectedX, selectedY;
+// The list of the selected place's checks, as last drawn, so a tap can pick a row. A picked check
+// moves to the next place tapped on the map.
+#define LIST_ROWS 18
+static int listTop, listLines;
+static int listChecks[LIST_ROWS];
+static int picked = -1;
 
 static bool atSelection(const MapCheck *check)
 {
@@ -360,17 +468,19 @@ static bool atSelection(const MapCheck *check)
 // Lists the tapped place's checks in a box over the map, each in its status color.
 static void drawSelection(const Canvas *c)
 {
+    listLines = 0;
     if (!selected)
         return;
     int count = 0;
     for (u32 i = 0; i < map.checkCount; i++)
     {
-        MapCheck check = map_check(&map, i);
+        MapCheck check = checkOf(i);
         count += atSelection(&check);
     }
     if (!count)
         return;
-    const int lines = count > 18 ? 18 : count, height = lines * 10 + 6;
+    // A picked check gets a line saying what to do.
+    const int lines = count > LIST_ROWS ? LIST_ROWS : count, height = (lines + (picked >= 0)) * 10 + 6;
     // The box goes on the half of the map away from the place, so the dot stays in view.
     int top = screenY(selectedY) < MAP_TOP + MAP_SIZE / 2 ? MAP_TOP + MAP_SIZE - height : MAP_TOP;
     canvas_box(c, MAP_LEFT + 1, top + 1, MAP_SIZE - 2, height - 2, 5, 0x101828, 200);
@@ -380,9 +490,10 @@ static void drawSelection(const Canvas *c)
     canvas_fill(c, x - 4, y - 4, 1, 9, 0xFFFFFF);
     canvas_fill(c, x + 4, y - 4, 1, 9, 0xFFFFFF);
     int line = 0;
+    listTop = top;
     for (u32 i = 0; i < map.checkCount && line < lines; i++)
     {
-        MapCheck check = map_check(&map, i);
+        MapCheck check = checkOf(i);
         if (!atSelection(&check))
             continue;
         static const u32 colors[] = {0xF06060, 0x60F060, 0x909090, 0xF0E060};
@@ -390,13 +501,25 @@ static void drawSelection(const Canvas *c)
         char name[30];
         // Dungeon checks drop their "[EP] " tag; the box is for one place anyway.
         const char *text = check.name[0] == '[' && check.name[3] == ']' ? check.name + 5 : check.name;
+        listChecks[line] = -1;
         if (line == lines - 1 && count > lines)
             snprintf(name, sizeof(name), "and %d more", count - lines + 1);
         else
+        {
             snprintf(name, sizeof(name), "%.28s", text);
+            listChecks[line] = i;
+        }
+        if ((int)i == picked)
+        {
+            canvas_box(c, MAP_LEFT + 2, top + 3 + line * 10, MAP_SIZE - 4, 10, 4, 0xFFEE9C, 255);
+            color = 0x1A1F2E;
+        }
         canvas_text(c, MAP_LEFT + 4, top + 4 + line * 10, name, color);
         line++;
     }
+    listLines = line;
+    if (picked >= 0)
+        canvas_text(c, MAP_LEFT + 4, top + 4 + line * 10, "Tap the map where it is", 0xFFEE9C);
 }
 
 static void compose(void)
@@ -440,7 +563,7 @@ static void compose(void)
     {
         for (u32 i = 0; i < map.checkCount; i++)
         {
-            MapCheck check = map_check(&map, i);
+            MapCheck check = checkOf(i);
             if (check.kind != KIND_ITEM)
                 continue;
             totalIn += status[i] == STATUS_IN_LOGIC;
@@ -453,7 +576,7 @@ static void compose(void)
             bool first = true;
             for (u32 j = 0; j < i && first; j++)
             {
-                MapCheck other = map_check(&map, j);
+                MapCheck other = checkOf(j);
                 first = !(other.kind == KIND_ITEM && other.map == check.map && other.x == check.x && other.y == check.y);
             }
             if (!first)
@@ -461,7 +584,7 @@ static void compose(void)
             int in = 0, out = 0, done = 0, glitched = 0;
             for (u32 j = i; j < map.checkCount; j++)
             {
-                MapCheck other = map_check(&map, j);
+                MapCheck other = checkOf(j);
                 if (other.kind == KIND_ITEM && other.map == check.map && other.x == check.x && other.y == check.y)
                 {
                     in += status[j] == STATUS_IN_LOGIC;
@@ -618,6 +741,7 @@ void map_refresh(void)
 void map_open(void)
 {
     selected = false;
+    picked = -1;
     zoom = 1;
     centerView(128, 128);
     shownWorld = currentWorld();
@@ -638,6 +762,31 @@ void map_touch(int x, int y)
     }
     if (!loaded || !hasState)
         return;
+    // A tap on a row of the list picks that check, or puts it back.
+    if (selected && x >= MAP_LEFT && x < MAP_LEFT + MAP_SIZE && y >= listTop + 3 && y < listTop + 3 + listLines * 10)
+    {
+        int row = (y - listTop - 3) / 10;
+        if (listChecks[row] >= 0)
+            picked = picked == listChecks[row] ? -1 : listChecks[row];
+        compose();
+        return;
+    }
+    // With a check picked, a tap on the map moves it there.
+    if (picked >= 0 && x >= MAP_LEFT && x < MAP_LEFT + MAP_SIZE && y >= MAP_TOP && y < MAP_TOP + MAP_SIZE)
+    {
+        int mx = viewX + (x - MAP_LEFT) * 256 / (MAP_SIZE * zoom), my = viewY + (y - MAP_TOP) * 256 / (MAP_SIZE * zoom);
+        mx = mx < 0 ? 0 : mx > 255 ? 255 : mx;
+        my = my < 0 ? 0 : my > 255 ? 255 : my;
+        moved[picked] = (Moved){1, shownWorld, mx, my};
+        overlay_log("map: moved %s to %d %d %d", map_check(&map, picked).name, shownWorld, mx, my);
+        saveMoved();
+        picked = -1;
+        selected = true;
+        selectedX = mx;
+        selectedY = my;
+        compose();
+        return;
+    }
     // The nearest marker within reach of the tap, or none to hide the list. Markers are larger
     // when zoomed in, and so is their reach.
     int reach = zoom > 1 ? 12 : 8;
@@ -645,7 +794,7 @@ void map_touch(int x, int y)
     bool found = false;
     for (u32 i = 0; i < map.checkCount; i++)
     {
-        MapCheck check = map_check(&map, i);
+        MapCheck check = checkOf(i);
         if (check.kind != KIND_ITEM || check.map != shownWorld)
             continue;
         int dx = screenX(check.x) - x, dy = screenY(check.y) - y;
@@ -686,6 +835,7 @@ void map_pan(int x, int y, u64 now)
 
 void map_switch_world(void)
 {
+    // A picked check stays picked, so it can move to the other world.
     selected = false;
     shownWorld = !shownWorld;
     compose();

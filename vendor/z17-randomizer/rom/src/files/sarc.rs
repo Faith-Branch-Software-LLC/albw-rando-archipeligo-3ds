@@ -11,30 +11,58 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Sarc(RefCell<Inner>);
+pub struct Sarc {
+    inner: RefCell<Inner>,
+    /// Where an archive read from the ROM came from, so its unchanged files can be read again.
+    origin: Option<(Rc<RefCell<RomSource>>, String)>,
+    /// Hashes of the files changed since the archive was read from the ROM.
+    changed: std::collections::BTreeSet<u32>,
+}
 
 impl Sarc {
     pub fn from(data: Box<[u8]>) -> Self {
-        Self(RefCell::new(Inner::Compressed(data)))
+        Self { inner: RefCell::new(Inner::Compressed(data)), origin: None, changed: Default::default() }
     }
 
     /// An archive that is read from the ROM on first use.
     pub(crate) fn lazy(source: Rc<RefCell<RomSource>>, path: String) -> Self {
-        Self(RefCell::new(Inner::OnRom(source, path)))
-    }
-
-    /// Drops the loaded data of an unmodified lazy archive, given where it came from.
-    pub(crate) fn release(&self, source: &Rc<RefCell<RomSource>>, path: &str) {
-        if let Ok(mut inner) = self.0.try_borrow_mut() {
-            *inner = Inner::OnRom(source.clone(), path.to_owned());
+        Self {
+            inner: RefCell::new(Inner::OnRom),
+            origin: Some((source, path)),
+            changed: Default::default(),
         }
     }
 
-    /// Moves the loaded data to disk. It comes back on next use. On failure it stays in memory.
+    /// Drops the loaded data of an unmodified lazy archive.
+    pub(crate) fn release(&self) {
+        if self.origin.is_some() && self.changed.is_empty() {
+            if let Ok(mut inner) = self.inner.try_borrow_mut() {
+                *inner = Inner::OnRom;
+            }
+        }
+    }
+
+    /// Moves the loaded data out of memory. It comes back on next use. On failure it stays in
+    /// memory.
+    ///
+    /// An archive from the ROM keeps only the files changed since, and reads the rest from the
+    /// ROM again. That needs no writing, which is slow on a 3DS SD card. Other archives go to disk.
     pub(crate) fn spill(&self) -> Result<()> {
-        let Ok(mut inner) = self.0.try_borrow_mut() else {
+        let Ok(mut inner) = self.inner.try_borrow_mut() else {
             return Ok(());
         };
+        if self.origin.is_some() {
+            let kept = match &mut *inner {
+                Inner::Decompressed(archive) => {
+                    let files = &mut archive.files;
+                    self.changed.iter().filter_map(|hash| files.remove_entry(hash)).collect()
+                },
+                Inner::Compressed(_) if self.changed.is_empty() => BTreeMap::new(),
+                _ => return Ok(()),
+            };
+            *inner = if kept.is_empty() { Inner::OnRom } else { Inner::Changes(kept) };
+            return Ok(());
+        }
         // A decompressed archive is written file by file, so spilling needs no large block.
         let (path, compressed) = match &*inner {
             Inner::Decompressed(archive) => (spill::write_with(|out| archive.write_spill(out))?, false),
@@ -45,16 +73,24 @@ impl Sarc {
         Ok(())
     }
 
+    fn load(&self) -> Result<()> {
+        load(&mut self.inner.borrow_mut(), &self.origin)
+    }
+
     fn decompress(&self) -> Result<Ref<'_, Archive>> {
-        self.0.borrow_mut().decompress()?;
-        Ok(Ref::map(self.0.borrow(), |inner| match inner {
+        self.load()?;
+        Ok(Ref::map(self.inner.borrow(), |inner| match inner {
             Inner::Decompressed(archive) => archive,
             _ => unreachable!(),
         }))
     }
 
-    fn decompress_mut(&mut self) -> Result<&mut Archive> {
-        self.0.get_mut().decompress()
+    /// The archive, for a change to the file at `path`.
+    fn decompress_mut(&mut self, path: &str) -> Result<&mut Archive> {
+        load(self.inner.get_mut(), &self.origin)?;
+        let Inner::Decompressed(archive) = self.inner.get_mut() else { unreachable!() };
+        self.changed.insert(archive.hash(path));
+        Ok(archive)
     }
 
     pub fn contains<P>(&self, path: P) -> Result<bool>
@@ -108,7 +144,7 @@ impl Sarc {
     {
         let path = path.into();
         debug!("Opening {} from archive", &path);
-        let data = self.decompress_mut()?.get_mut(&path)
+        let data = self.decompress_mut(&path)?.get_mut(&path)
             .map_err(|_| Error::new(format!("File not found: '{}'.", path)))?;
         Ok(File::new(path, data))
     }
@@ -118,39 +154,92 @@ impl Sarc {
         T: FromFile<Input = &'s mut [u8]>,
     {
         let path = T::path(args);
-        let data = self.decompress_mut()?.get_mut(&path)
+        let data = self.decompress_mut(&path)?.get_mut(&path)
             .map_err(|_| Error::new(format!("File not found: '{}'.", path)))?;
         Ok(File::new(path, T::from_file(data)?))
     }
 
     pub fn add(&mut self, file: File<Box<[u8]>>) -> Result<()> {
-        self.decompress_mut()?.add(file);
+        let archive = self.decompress_mut(&file.path)?;
+        archive.add(file);
         Ok(())
     }
 
     pub fn update(&mut self, file: File<Box<[u8]>>) -> Result<()> {
-        self.decompress_mut()?.update(file);
+        self.decompress_mut(&file.path)?.update(file);
         Ok(())
     }
 
     pub fn compress(self) -> Self {
-        match self.0.into_inner() {
-            Inner::OnRom(source, path) => Self::lazy(source, path),
-            Inner::Compressed(data) => Self::from(data),
-            Inner::Decompressed(archive) => Self::from(compress(&archive.into_bytes())),
-            Inner::Spilled(path, true) => Self::from(spill::take(&path).expect("spill file was just written")),
+        let origin = self.origin;
+        let mut inner = self.inner.into_inner();
+        if matches!(inner, Inner::Changes(_)) {
+            load(&mut inner, &origin).expect("archive was readable when first used");
+        }
+        let compressed = |data| Self { inner: RefCell::new(Inner::Compressed(data)), origin: None, changed: Default::default() };
+        match inner {
+            Inner::OnRom => match origin {
+                Some((source, path)) => Self::lazy(source, path),
+                None => unreachable!("only ROM archives are left on the ROM"),
+            },
+            Inner::Compressed(data) => compressed(data),
+            Inner::Decompressed(archive) => compressed(compress(&archive.into_bytes())),
+            Inner::Spilled(path, true) => compressed(spill::take(&path).expect("spill file was just written")),
             Inner::Spilled(path, false) => {
-                Self::from(compress(&Archive::load_spill(&path).expect("spill file was just written").into_bytes()))
+                compressed(compress(&Archive::load_spill(&path).expect("spill file was just written").into_bytes()))
             }
+            Inner::Changes(_) => unreachable!("changes were applied above"),
         }
     }
 }
 
+/// Brings the archive into memory, decompressed.
+fn load(inner: &mut Inner, origin: &Option<(Rc<RefCell<RomSource>>, String)>) -> Result<()> {
+    if let Inner::Spilled(path, compressed) = inner {
+        *inner = if *compressed { Inner::Compressed(spill::take(path)?) } else { Inner::Decompressed(Archive::load_spill(path)?) };
+    }
+    let changes = match std::mem::replace(inner, Inner::OnRom) {
+        Inner::Changes(files) => Some(files),
+        other => {
+            *inner = other;
+            None
+        },
+    };
+    if matches!(inner, Inner::OnRom) {
+        let (source, path) = origin.as_ref().expect("only ROM archives are left on the ROM");
+        let data = source.borrow_mut().read(path.clone())?;
+        *inner = Inner::Compressed(data.into_inner());
+    }
+    if let Inner::Compressed(data) = inner {
+        // Unpacking file by file needs no block the size of the whole archive. An archive
+        // laid out in a way that cannot be unpacked in order takes the old way.
+        let archive = match Archive::from_yaz0(data) {
+            Ok(archive) => archive,
+            Err(_) => Archive::from(
+                yaz0::decompress(data)
+                    .map_err(|_| Error::new("Archive could not be decompressed.".to_string()))?
+                    .into(),
+            )?,
+        };
+        *inner = Inner::Decompressed(archive);
+    }
+    if let (Some(changes), Inner::Decompressed(archive)) = (changes, &mut *inner) {
+        archive.files.extend(changes);
+    }
+    Ok(())
+}
+
 impl IntoBytes for Sarc {
     fn into_bytes(self) -> Box<[u8]> {
-        match self.0.into_inner() {
-            Inner::OnRom(source, path) => {
-                source.borrow_mut().read(path).expect("archive was readable when its scene loaded").into_inner()
+        let mut inner = self.inner.into_inner();
+        if let Inner::Changes(_) = inner {
+            load(&mut inner, &self.origin).expect("archive was readable when first used");
+        }
+        match inner {
+            Inner::OnRom => {
+                let (source, path) = self.origin.expect("only ROM archives are left on the ROM");
+                let data = source.borrow_mut().read(path).expect("archive was readable when its scene loaded");
+                data.into_inner()
             }
             Inner::Compressed(data) => data,
             Inner::Decompressed(archive) => archive.into_bytes(),
@@ -158,6 +247,7 @@ impl IntoBytes for Sarc {
             Inner::Spilled(path, false) => {
                 Archive::load_spill(&path).expect("spill file was just written").into_bytes()
             }
+            Inner::Changes(_) => unreachable!("changes were applied above"),
         }
     }
 }
@@ -170,40 +260,14 @@ impl IntoBytes for Ref<'_, [u8]> {
 
 #[derive(Debug)]
 pub enum Inner {
-    OnRom(Rc<RefCell<RomSource>>, String),
+    /// Not loaded. Read from the archive's origin on first use.
+    OnRom,
     Compressed(Box<[u8]>),
     Decompressed(Archive),
     /// On disk. The flag tells whether the bytes are still Yaz0 compressed.
     Spilled(std::path::PathBuf, bool),
-}
-
-impl Inner {
-    fn decompress(&mut self) -> Result<&mut Archive> {
-        if let Self::Spilled(path, compressed) = self {
-            *self = if *compressed { Self::Compressed(spill::take(path)?) } else { Self::Decompressed(Archive::load_spill(path)?) };
-        }
-        if let Self::OnRom(source, path) = self {
-            let data = source.borrow_mut().read(path.clone())?;
-            *self = Self::Compressed(data.into_inner());
-        }
-        if let Self::Compressed(data) = self {
-            // Unpacking file by file needs no block the size of the whole archive. An archive
-            // laid out in a way that cannot be unpacked in order takes the old way.
-            let archive = match Archive::from_yaz0(data) {
-                Ok(archive) => archive,
-                Err(_) => Archive::from(
-                    yaz0::decompress(data)
-                        .map_err(|_| Error::new("Archive could not be decompressed.".to_string()))?
-                        .into(),
-                )?,
-            };
-            *self = Self::Decompressed(archive);
-        }
-        match self {
-            Self::Decompressed(archive) => Ok(archive),
-            _ => unreachable!(),
-        }
-    }
+    /// Only the changed files are in memory. The rest come from the archive's origin.
+    Changes(BTreeMap<u32, Vec<u8>>),
 }
 
 #[derive(Debug)]

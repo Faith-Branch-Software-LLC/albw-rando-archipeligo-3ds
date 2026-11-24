@@ -590,6 +590,94 @@ static u64 lastTopSwap;
 static bool inSave;
 static u64 inSaveCheckedAt;
 
+// The timer's time at each state of the save file, so loading a save brings back the time it was
+// saved at. The game's copy of the save changes when it saves, so each new state is remembered
+// with the time it first appeared, and loading a file looks its state up. Kept with the seed.
+#define TIMES_PATH "sdmc:/luma/titles/00040000000EC300/albw-times.txt"
+#define TIMES_MAX 64
+static struct
+{
+    u32 hash;
+    u64 ticks;
+} times[TIMES_MAX];
+static int timesCount = -1;
+
+static void loadTimes(void)
+{
+    timesCount = 0;
+    FILE *file = fopen(TIMES_PATH, "r");
+    if (!file)
+        return;
+    unsigned long hash;
+    unsigned long long ticks;
+    while (timesCount < TIMES_MAX && fscanf(file, "%lx %llu", &hash, &ticks) == 2)
+    {
+        times[timesCount].hash = hash;
+        times[timesCount].ticks = ticks;
+        timesCount++;
+    }
+    fclose(file);
+}
+
+static void rememberTime(u32 hash, u64 ticks)
+{
+    // The oldest leaves when the list is full.
+    if (timesCount == TIMES_MAX)
+    {
+        memmove(times, times + 1, sizeof(times[0]) * (TIMES_MAX - 1));
+        timesCount--;
+    }
+    times[timesCount].hash = hash;
+    times[timesCount].ticks = ticks;
+    timesCount++;
+    FILE *file = fopen(TIMES_PATH, "w");
+    if (!file)
+        return;
+    for (int i = 0; i < timesCount; i++)
+        fprintf(file, "%08lx %llu\n", times[i].hash, times[i].ticks);
+    fclose(file);
+}
+
+static void watchSave(u64 now)
+{
+    static bool loadedBefore, restorePending;
+    static u32 lastHash;
+    static u64 checkedAt;
+    static int changesLogged;
+    bool loadedNow = map_save_loaded();
+    if (loadedNow && !loadedBefore)
+        restorePending = true;
+    loadedBefore = loadedNow;
+    if (!inSave || now - checkedAt < TICKS_PER_MS * 1000)
+        return;
+    checkedAt = now;
+    u32 hash;
+    if (!map_save_hash(&hash))
+        return;
+    if (timesCount < 0)
+        loadTimes();
+    if (restorePending)
+    {
+        restorePending = false;
+        lastHash = hash;
+        for (int i = timesCount - 1; i >= 0; i--)
+            if (times[i].hash == hash)
+            {
+                timerTicks = times[i].ticks;
+                overlay_log("timer: save %08lx loaded, back to %llu s", hash, timerTicks / TICKS_PER_MS / 1000);
+                return;
+            }
+        overlay_log("timer: save %08lx loaded, not seen before", hash);
+        return;
+    }
+    if (hash == lastHash)
+        return;
+    lastHash = hash;
+    rememberTime(hash, timerTicks);
+    if (changesLogged++ < 40)
+        overlay_log("timer: save data changed to %08lx at %llu s", hash, timerTicks / TICKS_PER_MS / 1000);
+}
+
 static void timerFrame(u64 now)
 {
     if (now - inSaveCheckedAt > TICKS_PER_MS * 500)
@@ -601,6 +689,7 @@ static void timerFrame(u64 now)
         if (inSave && !wasInSave)
             timerRunning = true;
     }
+    watchSave(now);
     // While a stage loads there is no player, and that time is left out, like other gaps.
     if (lastTopSwap && timerRunning && inSave && map_player_present())
     {
@@ -738,10 +827,6 @@ static bool marked(const Canvas *canvas)
 // again even when the game has not replaced their frame.
 u32 overlayVersion = 1;
 
-// For the first seconds, the top screen says that the plugin runs, so players can tell a plugin
-// that never loaded from one that loaded and shows nothing yet.
-static bool showHello = true;
-
 // Draws the overlay on one buffer unless this version is there already.
 static void drawOn(Screen *screen, u32 address, u32 *version)
 {
@@ -769,12 +854,6 @@ static void drawOn(Screen *screen, u32 address, u32 *version)
     {
         if (settings.timer && inSave)
             drawTimer(&canvas);
-        if (showHello)
-        {
-            static const char hello[] = "ALBW Randomizer QoL plugin on";
-            canvas_box(&canvas, 2, 224, sizeof(hello) * 8 + 6, 14, 5, 0x101010, 170);
-            canvas_text(&canvas, 6, 227, hello, 0xFFFFFF);
-        }
         const char *banner = rpc_banner();
         if (banner)
         {
@@ -875,7 +954,11 @@ static void overlayThread(void *arg)
     if (!launchedByApp && !archipelago && access(MAP_FILE, F_OK) != 0)
     {
         overlay_log("no seed from the app; plugin idle");
-        return;
+        // A thread made with svcCreateThread has nowhere to return to, so it must end itself.
+        if (logFile)
+            fclose(logFile);
+        logFile = NULL;
+        svcExitThread();
     }
     if (!archipelago)
         map_load();
@@ -992,12 +1075,7 @@ static void overlayThread(void *arg)
         // Each look at a screen asks the GPU service, so the plugin only follows the screens it
         // draws on, and the bottom one while learning the game's buffers.
         // Until the Archipelago client connects, the top screen shows the command to type into it.
-        if (showHello && now - started > TICKS_PER_MS * 15000)
-        {
-            showHello = false;
-            overlayVersion++;
-        }
-        bool banner = rpc_banner() != NULL || showHello;
+        bool banner = rpc_banner() != NULL;
         static bool hadBanner;
         if (banner != hadBanner)
         {

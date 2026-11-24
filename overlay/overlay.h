@@ -57,6 +57,10 @@ void map_pan(int x, int y, u64 now);
 bool map_player_present(void);
 // True while a save file is being played, not on the title screen.
 bool map_in_save(void);
+// Whether a save file is loaded, even while a stage loads.
+bool map_save_loaded(void);
+// A hash of the loaded save file as the game holds it. False when none is loaded.
+bool map_save_hash(u32 *hash);
 // Called often: follows cracks the player uses, and keeps an open map up to date.
 void map_tick(u64 now, bool open);
 void map_draw(const Canvas *canvas);

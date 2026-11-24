@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Place Editor</title>
+<!--
+  Moves the logic map's check locations (randomizer/src/tracker/places.rs) by dragging them on the
+  map. Open this file in a browser, then drop in:
+    - places.rs, from vendor/z17-randomizer/randomizer/src/tracker/;
+    - the map pictures from the SD card, sdmc:/3ds/albw-rando/qol/map2-hyrule-large.bin and
+      map2-lorule-large.bin (the app, 0.3.14 or later, makes them from your game);
+    - optionally places.txt from sdmc:/3ds/albw-rando/qol/, to start from moves made in the plugin.
+  Nothing leaves the browser. The map pictures come from the game, so they never go in the repo.
+-->
+<style>
+:root {
+  --bg: #f4f1ea; --panel: #fffdf8; --ink: #23201b; --muted: #6f685d; --line: #d9d2c4;
+  --accent: #2f6f4f; --accent-ink: #fff; --pin: #f2c230; --pin-moved: #3fb4e8; --pin-sel: #ff5a4e;
+  --ground: #3a3a32;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1b1a17; --panel: #24221e; --ink: #ece6da; --muted: #a39b8d; --line: #3a362f;
+    --accent: #5fb88a; --accent-ink: #10150f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1b1a17; --panel: #24221e; --ink: #ece6da; --muted: #a39b8d; --line: #3a362f;
+  --accent: #5fb88a; --accent-ink: #10150f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+header { display: flex; gap: 8px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0 12px 0 0; }
+button, label.btn { font: inherit; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+button:disabled { opacity: .45; cursor: default; }
+.status { color: var(--muted); margin-left: auto; }
+main { flex: 1; display: flex; min-height: 0; }
+#mapWrap { flex: 1; overflow: auto; position: relative; background: var(--ground); }
+#stage { position: relative; margin: 16px; }
+#stage canvas { display: block; image-rendering: pixelated; width: 100%; height: 100%; }
+#stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+#drop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: #eee; padding: 32px; pointer-events: none; }
+#drop div { max-width: 460px; background: rgba(0,0,0,.45); border: 2px dashed #bbb; border-radius: 12px; padding: 24px; }
+body.dragging #drop div { border-color: var(--pin); }
+aside { width: 340px; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+aside input[type=search] { margin: 10px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+#selected { padding: 0 10px 10px; border-bottom: 1px solid var(--line); max-height: 40%; overflow: auto; }
+#selected h2, #listHead { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 8px 0 4px; }
+#listHead { margin: 8px 10px 4px; }
+#selected label { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
+#selected .tools { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+#list { flex: 1; overflow: auto; padding: 0 4px 10px; }
+#list div { padding: 3px 8px; border-radius: 4px; cursor: pointer; display: flex; gap: 6px; }
+#list div:hover { background: var(--bg); }
+#list div.sel { background: var(--pin-sel); color: #fff; }
+#list .w { color: var(--muted); font-size: 12px; min-width: 18px; }
+#list div.sel .w { color: #fff; }
+.moved::after { content: "moved"; margin-left: auto; font-size: 11px; color: var(--pin-moved); }
+#list div.sel.moved::after { color: #fff; }
+#tip { position: fixed; pointer-events: none; background: rgba(0,0,0,.8); color: #fff; padding: 3px 7px; border-radius: 4px; font-size: 12px; display: none; max-width: 360px; z-index: 5; }
+.pin { cursor: grab; }
+.help { color: var(--muted); font-size: 12px; padding: 8px 10px; border-top: 1px solid var(--line); }
+@media (max-width: 760px) { main { flex-direction: column; } aside { width: auto; height: 45%; border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Place Editor</h1>
+  <label class="btn">Open files<input id="files" type="file" multiple accept=".rs,.bin,.txt" hidden></label>
+  <button id="hyrule" aria-pressed="true">Hyrule</button>
+  <button id="lorule" aria-pressed="false">Lorule</button>
+  <button id="zoomOut" title="Zoom out (-)">−</button>
+  <button id="zoomIn" title="Zoom in (+)">+</button>
+  <button id="undo" disabled title="Undo (Ctrl+Z)">Undo</button>
+  <button id="saveRs" class="primary" disabled>Save places.rs</button>
+  <button id="saveTxt" disabled title="For the SD card, to try the moves in the plugin">Save places.txt</button>
+  <span class="status" id="status">No places loaded</span>
+</header>
+<main>
+  <div id="mapWrap">
+    <div id="stage"><canvas id="map" width="464" height="464"></canvas><svg id="pins" viewBox="0 0 256 256"></svg></div>
+    <div id="drop"><div>Drop <b>places.rs</b> and the map pictures <b>map2-hyrule-large.bin</b> and <b>map2-lorule-large.bin</b> here.<br><br>Optional: <b>places.txt</b> from the SD card, to start from moves made in the plugin.</div></div>
+  </div>
+  <aside>
+    <input type="search" id="search" placeholder="Find a check">
+    <div id="selected"></div>
+    <div id="listHead">All checks</div>
+    <div id="list"></div>
+    <div class="help">Click a dot to pick every check there, or pick checks in the list. Drag a dot, or click the map, to move what is picked. Arrow keys move it by 1 (Shift: 5). Esc lets go.</div>
+  </aside>
+</main>
+<div id="tip"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const TUPLE = /\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/g;
+const STORE = "albw-place-editor";
+
+let source = null;          // places.rs text
+let places = [];            // {name, world, x, y, course, stage, ox, oy, ow}
+let maps = [null, null];    // ImageData per world
+let world = 0, zoom = 2;
+let picked = new Set();     // indexes
+let undo = [];
+let query = "";
+
+function status(text) { $("status").textContent = text; }
+
+function readStore() {
+  try { return JSON.parse(localStorage.getItem(STORE) || "null"); } catch { return null; }
+}
+function writeStore() {
+  try {
+    const moves = places.filter(moved).map((p) => [p.name, p.world, p.x, p.y]);
+    localStorage.setItem(STORE, JSON.stringify(moves));
+  } catch {}
+}
+function moved(p) { return p.x !== p.ox || p.y !== p.oy || p.world !== p.ow; }
+
+function loadPlaces(text) {
+  const found = [];
+  for (const m of text.matchAll(TUPLE)) {
+    const [, name, w, x, y, c, s] = m;
+    const n = (v) => Number(v);
+    found.push({ name: JSON.parse(`"${name}"`), world: n(w), x: n(x), y: n(y), course: n(c), stage: n(s), ow: n(w), ox: n(x), oy: n(y) });
+  }
+  if (!found.length) { status("That file has no places in it"); return; }
+  source = text;
+  places = found;
+  picked.clear();
+  undo = [];
+  const saved = readStore();
+  if (saved && saved.length && confirm(`Bring back ${saved.length} unsaved moves from last time?`)) applyMoves(saved, false);
+  refresh();
+}
+
+/** Moves as [name, world, x, y]. Names that repeat take the moves in order. */
+function applyMoves(moves, record) {
+  if (record) pushUndo(places.map((_, i) => i));
+  const used = new Set();
+  let count = 0;
+  for (const [name, w, x, y] of moves) {
+    const i = places.findIndex((p, i) => p.name === name && !used.has(i));
+    if (i < 0) continue;
+    used.add(i);
+    Object.assign(places[i], { world: w, x, y });
+    count++;
+  }
+  return count;
+}
+
+function loadTxt(text) {
+  if (!places.length) { status("Open places.rs first, then places.txt"); return; }
+  const moves = [];
+  // Files without a "v2" line come from 0.3.12 and 0.3.13, whose plugin map showed only
+  // 41/256..216/256 of the game's map. Their spots are converted to whole-map units.
+  let whole = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("v2")) { whole = true; continue; }
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/);
+    const unit = (v) => whole ? v : Math.floor(41 + v * 175 / 256);
+    if (m) moves.push([m[4], +m[1], unit(+m[2]), unit(+m[3])]);
+  }
+  const count = applyMoves(moves, true);
+  writeStore();
+  refresh();
+  status(`${count} moves from places.txt`);
+}
+
+function loadBin(name, buffer) {
+  const isLorule = /lorule/i.test(name);
+  const size = Math.round(Math.sqrt(buffer.byteLength / 2));
+  if (size * size * 2 !== buffer.byteLength) { status(`${name} is not a map picture`); return; }
+  const data = new DataView(buffer);
+  const image = new ImageData(size, size);
+  for (let i = 0; i < size * size; i++) {
+    const v = data.getUint16(i * 2, true);
+    // The app darkens the pictures for the plugin; brighten them back for editing.
+    const lift = (c) => Math.min(255, Math.round(c * 5 / 3));
+    image.data[i * 4] = lift(((v >> 11) & 31) * 255 / 31);
+    image.data[i * 4 + 1] = lift(((v >> 5) & 63) * 255 / 63);
+    image.data[i * 4 + 2] = lift((v & 31) * 255 / 31);
+    image.data[i * 4 + 3] = 255;
+  }
+  const w = isLorule ? 1 : 0;
+  if (!maps[w] || maps[w].width < size) maps[w] = image;
+  setWorld(w);
+}
+
+async function openFiles(list) {
+  const files = [...list];
+  // places.rs first, so places.txt has something to move.
+  files.sort((a, b) => (a.name.endsWith(".rs") ? -1 : 0) - (b.name.endsWith(".rs") ? -1 : 0));
+  for (const file of files) {
+    if (file.name.endsWith(".rs")) loadPlaces(await file.text());
+    else if (file.name.endsWith(".bin")) loadBin(file.name, await file.arrayBuffer());
+    else if (file.name.endsWith(".txt")) loadTxt(await file.text());
+  }
+}
+
+function setWorld(w) {
+  world = w;
+  $("hyrule").setAttribute("aria-pressed", w === 0);
+  $("lorule").setAttribute("aria-pressed", w === 1);
+  refresh();
+}
+
+function drawMap() {
+  const canvas = $("map");
+  const image = maps[world];
+  const ctx = canvas.getContext("2d");
+  if (image) {
+    canvas.width = image.width; canvas.height = image.height;
+    ctx.putImageData(image, 0, 0);
+  } else {
+    canvas.width = 256; canvas.height = 256;
+    ctx.fillStyle = "#4b4b40"; ctx.fillRect(0, 0, 256, 256);
+    ctx.strokeStyle = "#5a5a4e";
+    for (let i = 0; i <= 256; i += 32) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 256); ctx.moveTo(0, i); ctx.lineTo(256, i); ctx.stroke(); }
+  }
+  const side = 232 * zoom;
+  $("stage").style.width = side + "px";
+  $("stage").style.height = side + "px";
+  $("drop").style.display = places.length && (maps[0] || maps[1]) ? "none" : "flex";
+}
+
+function spots() {
+  const groups = new Map();
+  places.forEach((p, i) => {
+    if (p.world !== world) return;
+    const key = p.x + "," + p.y;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  return groups;
+}
+
+function drawPins() {
+  const svg = $("pins");
+  const r = 2.6 / Math.sqrt(zoom) * 1.4;
+  let out = "";
+  for (const [key, list] of spots()) {
+    const [x, y] = key.split(",").map(Number);
+    const sel = list.some((i) => picked.has(i));
+    const mv = list.some((i) => moved(places[i]));
+    const fill = sel ? "var(--pin-sel)" : mv ? "var(--pin-moved)" : "var(--pin)";
+    const rad = list.length > 1 ? r * 1.35 : r;
+    out += `<g class="pin" data-key="${key}"><circle cx="${x + .5}" cy="${y + .5}" r="${rad}" fill="${fill}" stroke="#000" stroke-width="${0.6 / Math.sqrt(zoom)}"/>`;
+    if (list.length > 1) out += `<text x="${x + .5}" y="${y + .5}" font-size="${rad * 1.25}" text-anchor="middle" dominant-baseline="central" fill="#000" pointer-events="none" font-weight="700">${list.length}</text>`;
+    out += `</g>`;
+  }
+  svg.innerHTML = out;
+}
+
+function drawList() {
+  const q = query.toLowerCase();
+  let html = "";
+  places.forEach((p, i) => {
+    if (q && !p.name.toLowerCase().includes(q)) return;
+    const cls = [picked.has(i) ? "sel" : "", moved(p) ? "moved" : ""].join(" ");
+    html += `<div class="${cls}" data-i="${i}"><span class="w">${p.world ? "L" : "H"}</span><span>${escapeHtml(p.name)}</span></div>`;
+  });
+  $("list").innerHTML = html || `<div style="color:var(--muted)">Nothing matches</div>`;
+  const chosen = [...picked];
+  let sel = `<h2>Picked (${chosen.length})</h2>`;
+  if (!chosen.length) sel += `<div style="color:var(--muted)">Nothing picked</div>`;
+  for (const i of chosen) {
+    const p = places[i];
+    sel += `<label><input type="checkbox" checked data-i="${i}"> <span>${escapeHtml(p.name)} <span style="color:var(--muted)">(${p.x}, ${p.y})</span></span></label>`;
+  }
+  if (chosen.length) sel += `<div class="tools"><button id="otherWorld">Move to ${world ? "Hyrule" : "Lorule"}</button><button id="reset">Back to original</button></div>`;
+  $("selected").innerHTML = sel;
+}
+
+function escapeHtml(text) { return text.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function refresh() {
+  drawMap(); drawPins(); drawList();
+  const count = places.filter(moved).length;
+  $("saveRs").disabled = !places.length;
+  $("saveTxt").disabled = !count;
+  $("undo").disabled = !undo.length;
+  if (places.length) status(`${places.length} checks, ${count} moved`);
+}
+
+function pushUndo(indexes) {
+  undo.push(indexes.map((i) => [i, places[i].world, places[i].x, places[i].y]));
+  if (undo.length > 200) undo.shift();
+}
+function doUndo() {
+  const step = undo.pop();
+  if (!step) return;
+  for (const [i, w, x, y] of step) Object.assign(places[i], { world: w, x, y });
+  writeStore(); refresh();
+}
+
+function clamp(v) { return Math.max(0, Math.min(255, Math.round(v))); }
+
+function toMap(event) {
+  const box = $("pins").getBoundingClientRect();
+  return [clamp((event.clientX - box.left) / box.width * 256 - .5), clamp((event.clientY - box.top) / box.height * 256 - .5)];
+}
+
+/** Moves the picked checks so the first keeps its offset from the others. */
+function moveTo(x, y, w = world) {
+  const chosen = [...picked];
+  if (!chosen.length) return;
+  const anchor = places[chosen[0]];
+  const dx = x - anchor.x, dy = y - anchor.y;
+  for (const i of chosen) {
+    const p = places[i];
+    p.x = clamp(p.x + dx); p.y = clamp(p.y + dy); p.world = w;
+  }
+}
+
+// Dragging and clicking on the map.
+let drag = null;
+$("pins").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || !places.length) return;
+  const pin = event.target.closest(".pin");
+  const [x, y] = toMap(event);
+  if (pin) {
+    const list = spots().get(pin.dataset.key) || [];
+    if (!list.some((i) => picked.has(i))) { picked = new Set(list); }
+    pushUndo([...picked]);
+    drag = { moved: false };
+    $("pins").setPointerCapture(event.pointerId);
+    refresh();
+  } else if (picked.size) {
+    pushUndo([...picked]);
+    moveTo(x, y);
+    writeStore(); refresh();
+  }
+});
+$("pins").addEventListener("pointermove", (event) => {
+  const [x, y] = toMap(event);
+  const tip = $("tip");
+  if (drag) {
+    drag.moved = true;
+    moveTo(x, y);
+    drawPins();
+    tip.style.display = "block";
+    tip.textContent = `${x}, ${y}`;
+  } else {
+    const pin = event.target.closest(".pin");
+    const list = pin ? spots().get(pin.dataset.key) || [] : [];
+    tip.style.display = "block";
+    tip.innerHTML = list.length ? list.slice(0, 12).map((i) => escapeHtml(places[i].name)).join("<br>") + (list.length > 12 ? `<br>and ${list.length - 12} more` : "") + `<br><span style="opacity:.7">${x}, ${y}</span>` : `${x}, ${y}`;
+  }
+  tip.style.left = event.clientX + 14 + "px";
+  tip.style.top = event.clientY + 14 + "px";
+});
+$("pins").addEventListener("pointerup", () => {
+  if (drag) {
+    if (!drag.moved) undo.pop();
+    drag = null; writeStore(); refresh();
+  }
+});
+$("pins").addEventListener("pointerleave", () => { if (!drag) $("tip").style.display = "none"; });
+
+$("list").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-i]");
+  if (!row) return;
+  const i = Number(row.dataset.i);
+  if (event.metaKey || event.ctrlKey || event.shiftKey) {
+    picked.has(i) ? picked.delete(i) : picked.add(i);
+  } else {
+    picked = new Set([i]);
+  }
+  if (places[i].world !== world) setWorld(places[i].world); else refresh();
+  scrollToPin(places[i]);
+});
+
+function scrollToPin(p) {
+  const wrap = $("mapWrap");
+  const side = 232 * zoom;
+  wrap.scrollTo({ left: 16 + p.x / 256 * side - wrap.clientWidth / 2, top: 16 + p.y / 256 * side - wrap.clientHeight / 2, behavior: "smooth" });
+}
+
+$("selected").addEventListener("change", (event) => {
+  const i = Number(event.target.dataset.i);
+  if (!event.target.checked) picked.delete(i);
+  refresh();
+});
+$("selected").addEventListener("click", (event) => {
+  if (event.target.id === "otherWorld") {
+    pushUndo([...picked]);
+    const target = world ? 0 : 1;
+    for (const i of picked) places[i].world = target;
+    writeStore(); setWorld(target);
+  } else if (event.target.id === "reset") {
+    pushUndo([...picked]);
+    for (const i of picked) Object.assign(places[i], { world: places[i].ow, x: places[i].ox, y: places[i].oy });
+    writeStore(); refresh();
+  }
+});
+
+$("search").addEventListener("input", (event) => { query = event.target.value; drawList(); });
+$("hyrule").onclick = () => setWorld(0);
+$("lorule").onclick = () => setWorld(1);
+$("zoomIn").onclick = () => { zoom = Math.min(6, zoom + 1); refresh(); };
+$("zoomOut").onclick = () => { zoom = Math.max(1, zoom - 1); refresh(); };
+$("undo").onclick = doUndo;
+$("files").addEventListener("change", (event) => openFiles(event.target.files));
+
+document.addEventListener("keydown", (event) => {
+  if (event.target.tagName === "INPUT") return;
+  if ((event.metaKey || event.ctrlKey) && event.key === "z") { event.preventDefault(); doUndo(); return; }
+  if (event.key === "Escape") { picked.clear(); refresh(); return; }
+  if (event.key === "+" || event.key === "=") { $("zoomIn").click(); return; }
+  if (event.key === "-") { $("zoomOut").click(); return; }
+  const step = event.shiftKey ? 5 : 1;
+  const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+  if (d && picked.size) {
+    event.preventDefault();
+    pushUndo([...picked]);
+    for (const i of picked) { places[i].x = clamp(places[i].x + d[0]); places[i].y = clamp(places[i].y + d[1]); }
+    writeStore(); refresh();
+  }
+});
+
+// Files can be dropped anywhere.
+document.addEventListener("dragover", (event) => { event.preventDefault(); document.body.classList.add("dragging"); });
+document.addEventListener("dragleave", (event) => { if (!event.relatedTarget) document.body.classList.remove("dragging"); });
+document.addEventListener("drop", (event) => { event.preventDefault(); document.body.classList.remove("dragging"); openFiles(event.dataTransfer.files); });
+
+function download(name, text) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+$("saveRs").onclick = () => {
+  let i = 0;
+  const text = source.replace(TUPLE, (whole, name) => {
+    const p = places[i++];
+    return `("${name}", ${p.world}, ${p.x}, ${p.y}, ${p.course}, ${p.stage})`;
+  });
+  download("places.rs", text);
+  try { localStorage.removeItem(STORE); } catch {}
+  status(`Saved places.rs with ${places.filter(moved).length} moves. Put it in vendor/z17-randomizer/randomizer/src/tracker/.`);
+};
+$("saveTxt").onclick = () => {
+  const lines = places.filter(moved).map((p) => `${p.world} ${p.x} ${p.y} ${p.name}`);
+  download("places.txt", ["v2", ...lines].join("\n") + "\n");
+};
+
+refresh();
+</script>
+</body>
+</html>

@@ -285,12 +285,12 @@ impl Rom {
 
     pub fn boot(&self) -> Result<Language> {
         let flow = self.flow_chart.get().load().boot()?.iter().cloned();
-        let archive = self.romfs.borrow_mut().read("US/RegionBoot.szs")?.map(Sarc::from);
+        let archive = lazy_file(&self.romfs, "US/RegionBoot.szs");
         Ok(Language::new(flow, archive))
     }
 
     pub fn common(&mut self) -> Result<Actors> {
-        Ok(Actors::new(self.romfs.borrow_mut().read("Archive/ActorCommon.szs")?.map(Sarc::from)))
+        Ok(Actors::new(lazy_file(&self.romfs, "Archive/ActorCommon.szs")))
     }
 
     pub fn course(&self, id: CourseId) -> Course<'_> {
@@ -303,7 +303,7 @@ impl Rom {
 
     pub fn language(&self, course: CourseId) -> Result<Language> {
         let flow = self.flow_chart.get().load().course(course).unwrap_or_default().iter().cloned();
-        let archive = self.romfs.borrow_mut().read(format!("US_English/{}.szs", course.as_str()))?.map(Sarc::from);
+        let archive = lazy_file(&self.romfs, &format!("US_English/{}.szs", course.as_str()));
         Ok(Language::new(flow, archive))
     }
 
@@ -314,7 +314,7 @@ impl Rom {
             romfs.read(format!("World/Byaml/{}_stage.byaml", name))?.try_map(|data| byaml::from_bytes(&data))?;
         // Most scenes never touch their archive, so it stays on the ROM until first use.
         let path = format!("Archive/{}.szs", name);
-        let actors = File::new(path.clone(), Sarc::lazy(self.romfs.clone(), path));
+        let actors = lazy_file(&self.romfs, &path);
         Ok(Scene::new(stage, actors, self.romfs.clone()))
     }
 
@@ -369,4 +369,10 @@ macro_rules! string_constants {
             $(pub const $variant: &'static str = stringify!($variant);)+
         }
     }
+}
+
+/// An archive read from the ROM on first use. Archives from the ROM can leave memory without being
+/// written to disk, since only their changed files need to stay.
+fn lazy_file(romfs: &Rc<RefCell<RomSource>>, path: &str) -> File<Sarc> {
+    File::new(path.to_owned(), Sarc::lazy(romfs.clone(), path.to_owned()))
 }

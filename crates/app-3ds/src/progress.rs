@@ -22,12 +22,14 @@ pub mod job_phase {
     pub const ADDING_MODS: &str = "Adding models and voices";
 }
 
+// From a New 3DS run of 0.3.10 with the user's preset, a model and a voice (about 32 minutes),
+// less the SD card writes that 0.3.13 no longer makes: about 17 minutes. Not yet measured.
 const STEPS: [Step; 5] = [
-    Step { label: "Placing items", new_3ds_seconds: 62.0 },
-    Step { label: "Writing hints", new_3ds_seconds: 51.0 },
-    Step { label: "Updating the world", new_3ds_seconds: 88.0 },
-    Step { label: "Updating items and text", new_3ds_seconds: 26.0 },
-    Step { label: "Compressing and saving", new_3ds_seconds: 204.0 },
+    Step { label: "Placing items", new_3ds_seconds: 250.0 },
+    Step { label: "Writing hints", new_3ds_seconds: 130.0 },
+    Step { label: "Updating the world", new_3ds_seconds: 150.0 },
+    Step { label: "Updating items and text", new_3ds_seconds: 120.0 },
+    Step { label: "Compressing and saving", new_3ds_seconds: 350.0 },
 ];
 /// Rough speed ratio from measured logs. The ETA corrects itself as real timings arrive.
 const OLD_3DS_SLOWDOWN: f32 = 3.6;
